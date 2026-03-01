@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Manager Daemon — OAuth token refresh
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/ai-manager-daemon
+Restart=on-failure
+RestartSec=5s
+WatchdogSec=60s
+NotifyAccess=main
+
+[Install]
+WantedBy=multi-user.target

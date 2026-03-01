@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Manager v3</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      window.onerror = function(msg, src, line, col, err) {
+        document.getElementById('app').innerHTML =
+          '<pre style="color:#ef4444;padding:24px;font-size:14px;white-space:pre-wrap;">ERROR: ' +
+          msg + '\n\nSource: ' + src + ':' + line + ':' + col +
+          (err && err.stack ? '\n\nStack:\n' + err.stack : '') + '</pre>';
+      };
+      window.addEventListener('unhandledrejection', function(e) {
+        document.getElementById('app').innerHTML =
+          '<pre style="color:#ef4444;padding:24px;font-size:14px;white-space:pre-wrap;">UNHANDLED PROMISE:\n' +
+          (e.reason && e.reason.stack ? e.reason.stack : e.reason) + '</pre>';
+      });
+    </script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

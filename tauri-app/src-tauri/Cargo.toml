@@ -1,0 +1,39 @@
+[package]
+name = "ai-manager-tauri"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "ai_manager_tauri"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "ai-manager"
+path = "src/main.rs"
+
+[dependencies]
+ai_manager_core = { package = "core", path = "../../crates/core" }
+ai_sync = { package = "sync", path = "../../crates/sync" }
+proxy = { path = "../../crates/proxy" }
+tauri = { version = "2", features = ["devtools"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }
+hostname = "0.4"
+tauri-plugin-window-state = "2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+devtools = ["tauri/devtools"]

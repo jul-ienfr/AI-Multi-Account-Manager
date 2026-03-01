@@ -1,0 +1,35 @@
+[package]
+name = "daemon"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ai-daemon"
+path = "src/main.rs"
+
+[dependencies]
+ai-core = { path = "../core", package = "core" }
+ai-proxy = { path = "../proxy", package = "proxy" }
+ai-sync = { path = "../sync", package = "sync" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+notify = { workspace = true }
+dirs = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"

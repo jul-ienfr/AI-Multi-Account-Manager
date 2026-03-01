@@ -1,0 +1,28 @@
+# Rust
+/target/
+Cargo.lock
+
+# Node
+node_modules/
+dist/
+.svelte-kit/
+
+# Tauri
+/tauri-app/src-tauri/target/
+/tauri-app/src-tauri/WixTools/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+
+# Logs
+*.log

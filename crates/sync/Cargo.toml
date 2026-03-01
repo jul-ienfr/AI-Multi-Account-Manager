@@ -1,0 +1,30 @@
+[package]
+name = "sync"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ai-core = { path = "../core", package = "core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+# mDNS pour découverte de pairs (cross-platform)
+mdns-sd = { workspace = true }
+# flume est utilisé directement pour les RecvTimeoutError de mdns-sd 0.11
+flume = "0.11"
+# Chiffrement NaCl
+sodiumoxide = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"

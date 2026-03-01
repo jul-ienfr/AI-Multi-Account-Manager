@@ -1,0 +1,75 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/proxy",
+    "crates/sync",
+    "crates/daemon",
+    "tauri-app/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "3.0.0"
+edition = "2021"
+authors = ["AI Manager Team"]
+license = "MIT"
+
+[workspace.dependencies]
+# Async
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+async-stream = "0.3"
+
+# HTTP
+axum = { version = "0.8", features = ["macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "2"
+
+# Crypto / Security
+sodiumoxide = "0.2"
+
+# mDNS / Networking
+mdns-sd = "0.11"
+
+# File watching
+notify = "6"
+
+# Logging / Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Utils
+serde_with = "3"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+parking_lot = "0.12"
+thiserror = "2"
+anyhow = "1"
+indexmap = { version = "2", features = ["serde"] }
+bytes = "1"
+regex = "1"
+sha2 = "0.10"
+hex = "0.4"
+dirs = "5"
+
+# Workspace crates
+core = { path = "crates/core" }
+proxy = { path = "crates/proxy" }
+sync = { path = "crates/sync" }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
