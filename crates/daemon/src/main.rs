@@ -8,17 +8,22 @@
 //! - Fichier PID (`/tmp/ai-manager.pid`)
 //! - Intégration optionnelle du proxy et de la sync P2P
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use parking_lot::RwLock;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use ai_core::config::ConfigCache;
 use ai_core::credentials::CredentialsCache;
+use ai_core::event_log::EventLog;
+use daemon::http_api::DaemonState;
 use daemon::refresh_loop::RefreshLoop;
 use daemon::watchdog::CredentialsWatchdog;
 
@@ -103,6 +108,18 @@ struct Cli {
     /// Port du proxy (défaut: 18080)
     #[arg(long, default_value = "18080", env = "AI_PROXY_PORT")]
     proxy_port: u16,
+
+    /// Activer l'API HTTP REST (défaut: true)
+    #[arg(long, default_value = "true", env = "AI_API_ENABLED")]
+    api_enabled: bool,
+
+    /// Port de l'API HTTP REST (défaut: 18089)
+    #[arg(long, default_value = "18089", env = "AI_API_PORT")]
+    api_port: u16,
+
+    /// Token Bearer pour l'API HTTP REST (optionnel)
+    #[arg(long, env = "AI_API_TOKEN")]
+    api_token: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -302,6 +319,49 @@ async fn start_daemon(cli: Cli) -> Result<()> {
         None
     };
 
+    // API HTTP REST (optionnelle)
+    let api_handle = if cli.api_enabled {
+        let api_addr: SocketAddr = format!("0.0.0.0:{}", cli.api_port)
+            .parse()
+            .with_context(|| "parsing API address")?;
+        if let Some(ref token) = cli.api_token {
+            info!(
+                "HTTP API listening on {} (Bearer auth enabled, token={}...)",
+                api_addr,
+                &token[..token.len().min(4)]
+            );
+        } else {
+            info!("HTTP API listening on {} (no auth)", api_addr);
+        }
+        let event_log = Arc::new(EventLog::new(
+            creds_path.parent().unwrap_or(&creds_path),
+        ));
+        let daemon_state = Arc::new(DaemonState {
+            credentials: Arc::clone(&credentials),
+            config: Arc::clone(&config),
+            proxy_instances: Arc::new(RwLock::new(HashMap::new())),
+            peers: Arc::new(RwLock::new(Vec::new())),
+            velocity_calculators: Arc::new(RwLock::new(HashMap::new())),
+            quota_metrics: Arc::new(RwLock::new(HashMap::new())),
+            invalid_grant_accounts: Arc::new(RwLock::new(HashSet::new())),
+            event_log,
+            credentials_path: creds_path.clone(),
+            settings_path: settings_path.clone(),
+            http_client: reqwest::Client::new(),
+            api_token: cli.api_token,
+            shutdown_tx: shutdown_tx.clone(),
+        });
+        let api_rx = shutdown_rx.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = daemon::http_api::serve(daemon_state, api_addr, api_rx).await {
+                error!("HTTP API error: {}", e);
+            }
+        }))
+    } else {
+        info!("HTTP API disabled");
+        None
+    };
+
     // Daemon entièrement démarré — notifier systemd
     sd_notify("READY=1\n");
     info!("Daemon ready — waiting for signals");
@@ -341,6 +401,9 @@ async fn start_daemon(cli: Cli) -> Result<()> {
     }
     if let Some(h) = proxy_handle {
         h.abort();
+    }
+    if let Some(h) = api_handle {
+        let _ = h.await;
     }
 
     // Supprime le PID file

@@ -1,0 +1,146 @@
+//! Handlers sync P2P — gestion des pairs et de la clé partagée.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::extract::{Path, State};
+use axum::response::IntoResponse;
+use axum::Json;
+use serde_json::json;
+
+use ai_core::config::PeerConfig;
+use ai_core::types::Peer;
+
+use crate::dto::{AddPeerData, SetKeyData, TestPeerData};
+use super::{DaemonState, error_json, ok_json};
+
+// ---------------------------------------------------------------------------
+// sync_status
+// ---------------------------------------------------------------------------
+
+/// `GET /sync/status` — état général de la synchronisation P2P.
+pub async fn sync_status(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    let sync = state.config.read().sync.clone();
+    let peers = state.peers.read().clone();
+    ok_json(json!({
+        "enabled": sync.enabled,
+        "port": sync.port,
+        "peer_count": peers.len(),
+        "peers": peers,
+        "key_configured": sync.shared_key_hex.is_some(),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// list_peers
+// ---------------------------------------------------------------------------
+
+/// `GET /peers` — liste des pairs configurés.
+pub async fn list_peers(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    let peers = state.peers.read().clone();
+    ok_json(peers)
+}
+
+// ---------------------------------------------------------------------------
+// add_peer
+// ---------------------------------------------------------------------------
+
+/// `POST /peers` — ajoute un nouveau pair P2P.
+pub async fn add_peer(
+    State(state): State<Arc<DaemonState>>,
+    Json(body): Json<AddPeerData>,
+) -> impl IntoResponse {
+    let id = body
+        .id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()[..8].to_string());
+
+    let peer = Peer {
+        id: id.clone(),
+        host: body.host.clone(),
+        port: body.port,
+        connected: false,
+        last_seen: None,
+    };
+
+    let peer_config = PeerConfig {
+        id: id.clone(),
+        host: body.host,
+        port: body.port,
+    };
+
+    state.peers.write().push(peer);
+    state.config.write().sync.peers.push(peer_config);
+    let _ = state.config.persist();
+
+    ok_json(json!({"ok": true, "id": id}))
+}
+
+// ---------------------------------------------------------------------------
+// remove_peer
+// ---------------------------------------------------------------------------
+
+/// `DELETE /peers/:id` — supprime un pair par identifiant.
+pub async fn remove_peer(
+    State(state): State<Arc<DaemonState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    state.peers.write().retain(|p| p.id != id);
+    state.config.write().sync.peers.retain(|p| p.id != id);
+    let _ = state.config.persist();
+
+    ok_json(json!({"ok": true}))
+}
+
+// ---------------------------------------------------------------------------
+// gen_key
+// ---------------------------------------------------------------------------
+
+/// `POST /sync/key/generate` — génère une nouvelle clé partagée 256-bit.
+pub async fn gen_key(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    let u1 = uuid::Uuid::new_v4();
+    let u2 = uuid::Uuid::new_v4();
+    let mut bytes = [0u8; 32];
+    bytes[..16].copy_from_slice(u1.as_bytes());
+    bytes[16..].copy_from_slice(u2.as_bytes());
+    let hex_key = hex::encode(bytes);
+
+    state.config.write().sync.shared_key_hex = Some(hex_key.clone());
+    let _ = state.config.persist();
+
+    ok_json(json!({"key": hex_key}))
+}
+
+// ---------------------------------------------------------------------------
+// set_key
+// ---------------------------------------------------------------------------
+
+/// `POST /sync/key/set` — définit manuellement la clé partagée.
+pub async fn set_key(
+    State(state): State<Arc<DaemonState>>,
+    Json(body): Json<SetKeyData>,
+) -> impl IntoResponse {
+    if body.key.len() != 64 || !body.key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return error_json(400, "key must be 64 hex chars");
+    }
+
+    state.config.write().sync.shared_key_hex = Some(body.key.clone());
+    let _ = state.config.persist();
+
+    ok_json(json!({"ok": true}))
+}
+
+// ---------------------------------------------------------------------------
+// test_peer
+// ---------------------------------------------------------------------------
+
+/// `POST /peers/test` — teste la connectivité TCP vers un pair (stateless).
+pub async fn test_peer(Json(body): Json<TestPeerData>) -> impl IntoResponse {
+    let addr = format!("{}:{}", body.host, body.port);
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await;
+
+    ok_json(json!({"reachable": result.is_ok()}))
+}

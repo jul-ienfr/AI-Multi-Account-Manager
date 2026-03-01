@@ -219,6 +219,26 @@ pub struct ProxyInstanceState {
 }
 
 // ---------------------------------------------------------------------------
+// Proxy instance runtime
+// ---------------------------------------------------------------------------
+
+/// Cached quota metrics per account (populated by refresh loop).
+#[derive(Debug, Clone, Default)]
+pub struct QuotaMetricsCache {
+    pub ema_velocity: f64,
+    pub time_to_threshold: Option<f64>,
+    pub resets_at_5h: Option<String>,
+    pub resets_at_7d: Option<String>,
+}
+
+/// Runtime state for a single proxy instance (in-memory only, not persisted).
+pub struct ProxyInstanceRuntime {
+    pub status: parking_lot::RwLock<ProxyStatus>,
+    pub task_handle: parking_lot::Mutex<Option<tokio::task::AbortHandle>>,
+    pub child_process: parking_lot::Mutex<Option<std::process::Child>>,
+}
+
+// ---------------------------------------------------------------------------
 // Peer P2P
 // ---------------------------------------------------------------------------
 
