@@ -279,6 +279,10 @@ async fn start_daemon(cli: Cli) -> Result<()> {
         ));
         bus.start().await.with_context(|| "starting sync bus")?;
 
+        // Injecte les credentials pour répondre directement aux SyncRequest entrants
+        // (pairs qui ne nous ont pas configuré comme peer, sync asymétrique)
+        bus.set_credentials(Arc::clone(&credentials));
+
         // Connecter les pairs configurés dans settings.json
         for peer_cfg in &sync_cfg.peers {
             let protocol = ai_sync::compat::PeerProtocol::Unknown;

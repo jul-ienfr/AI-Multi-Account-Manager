@@ -85,6 +85,8 @@ pub struct SyncBus {
     message_tx: broadcast::Sender<SyncMessage>,
     /// Déduplication rolling window des messages traités
     dedup: Arc<RwLock<MessageDedup>>,
+    /// Credentials pour répondre directement aux SyncRequest entrants (sans peer config symétrique)
+    direct_creds: Arc<RwLock<Option<Arc<ai_core::credentials::CredentialsCache>>>>,
 }
 
 impl SyncBus {
@@ -102,7 +104,16 @@ impl SyncBus {
             peers: Arc::new(RwLock::new(HashMap::new())),
             message_tx: tx,
             dedup: Arc::new(RwLock::new(MessageDedup::new())),
+            direct_creds: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Enregistre les credentials pour répondre directement aux SyncRequest entrants.
+    ///
+    /// Permet à un pair qui ne nous a pas configuré comme peer de recevoir nos
+    /// credentials en réponse directe sur la connexion entrante.
+    pub fn set_credentials(&self, creds: Arc<ai_core::credentials::CredentialsCache>) {
+        *self.direct_creds.write() = Some(creds);
     }
 
     /// Génère une clé symétrique aléatoire (pour le CLI --generate-key).
@@ -219,6 +230,54 @@ impl SyncBus {
                         if let Some(entry) = peers.get_mut(instance_id) {
                             entry.detector.heartbeat();
                             debug!("Heartbeat from peer {} registered (phi accrual)", instance_id);
+                        }
+                    }
+
+                    // Réponse directe aux SyncRequest entrants (sans peer config symétrique)
+                    // Si le pair qui nous envoie un SyncRequest n'est pas dans notre liste
+                    // de peers configurés, son broadcast() ne pourra pas nous répondre.
+                    // On répond donc directement sur la même connexion TCP.
+                    if matches!(&msg.payload, SyncPayload::SyncRequest { .. }) {
+                        // Cloner les données AVANT tout await (RwLockReadGuard n'est pas Send)
+                        let maybe_frame: Option<Vec<u8>> = {
+                            let creds_lock = self.direct_creds.read();
+                            if let Some(creds) = creds_lock.as_ref() {
+                                match creds.export_json() {
+                                    Ok(accounts_json) => {
+                                        let active_key = creds.active_key();
+                                        let mut clock = HashMap::new();
+                                        clock.insert(self.instance_id.clone(), 1u64);
+                                        let response = SyncMessage::new(
+                                            &self.instance_id,
+                                            SyncPayload::SyncResponse {
+                                                credentials_json: accounts_json,
+                                                active_key,
+                                                clock,
+                                            },
+                                        );
+                                        match serde_json::to_vec(&response) {
+                                            Ok(data) => Some(encrypt(&data, &self.shared_key.0)),
+                                            Err(e) => {
+                                                warn!("Failed to serialize SyncResponse: {}", e);
+                                                None
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to export credentials for SyncResponse: {}", e);
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            }
+                        }; // drop creds_lock ici
+                        if let Some(frame) = maybe_frame {
+                            if let Err(e) = send_frame(&mut stream, &frame).await {
+                                warn!("Direct SyncResponse to {} failed: {}", peer_addr, e);
+                            } else {
+                                info!("Direct SyncResponse sent to {}", peer_addr);
+                            }
                         }
                     }
 
