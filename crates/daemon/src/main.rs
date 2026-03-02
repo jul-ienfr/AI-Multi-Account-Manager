@@ -23,7 +23,7 @@ use tracing_subscriber::EnvFilter;
 use ai_core::config::ConfigCache;
 use ai_core::credentials::CredentialsCache;
 use ai_core::event_log::EventLog;
-use ai_core::types::{ProxyInstanceRuntime, ProxyStatus};
+use ai_core::types::{Peer, ProxyInstanceRuntime, ProxyStatus};
 use daemon::http_api::DaemonState;
 use daemon::refresh_loop::RefreshLoop;
 use daemon::watchdog::CredentialsWatchdog;
@@ -361,7 +361,15 @@ async fn start_daemon(cli: Cli) -> Result<()> {
             credentials: Arc::clone(&credentials),
             config: Arc::clone(&config),
             proxy_instances: Arc::new(RwLock::new(initial_proxy_instances)),
-            peers: Arc::new(RwLock::new(Vec::new())),
+            peers: Arc::new(RwLock::new(
+                sync_cfg.peers.iter().map(|p| Peer {
+                    id: p.id.clone(),
+                    host: p.host.clone(),
+                    port: p.port,
+                    connected: false,
+                    last_seen: None,
+                }).collect()
+            )),
             velocity_calculators: Arc::new(RwLock::new(HashMap::new())),
             quota_metrics: Arc::new(RwLock::new(HashMap::new())),
             invalid_grant_accounts: Arc::new(RwLock::new(HashSet::new())),

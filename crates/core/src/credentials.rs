@@ -73,15 +73,18 @@ mod flexible_datetime {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthData {
+    #[serde(default, alias = "access_token")]
     pub access_token: String,
+    #[serde(default, alias = "refresh_token")]
     pub refresh_token: String,
     #[serde(
         default,
+        alias = "expires_at",
         deserialize_with = "flexible_datetime::deserialize",
         serialize_with = "flexible_datetime::serialize"
     )]
     pub expires_at: Option<DateTime<Utc>>,
-    #[serde(default)]
+    #[serde(default, alias = "token_type")]
     pub token_type: Option<String>,
     #[serde(default)]
     pub scope: Option<String>,
@@ -89,11 +92,12 @@ pub struct OAuthData {
     pub scopes: Option<Vec<String>>,
     #[serde(
         default,
+        alias = "refresh_token_expires_at",
         deserialize_with = "flexible_datetime::deserialize",
         serialize_with = "flexible_datetime::serialize"
     )]
     pub refresh_token_expires_at: Option<DateTime<Utc>>,
-    #[serde(default)]
+    #[serde(default, alias = "organization_uuid")]
     pub organization_uuid: Option<String>,
 }
 
@@ -137,17 +141,17 @@ pub struct AccountData {
     pub auto_switch_disabled: Option<bool>,
 
     // --- V2 OAuth slots ---
-    #[serde(default)]
+    #[serde(default, alias = "claude_ai_oauth")]
     pub claude_ai_oauth: Option<OAuthData>,
-    #[serde(default)]
+    #[serde(default, alias = "setup_token")]
     pub setup_token: Option<OAuthData>,
-    #[serde(default)]
+    #[serde(default, alias = "gemini_cli_oauth")]
     pub gemini_cli_oauth: Option<OAuthData>,
-    #[serde(default)]
+    #[serde(default, alias = "gemini_code_assist_oauth")]
     pub gemini_code_assist_oauth: Option<OAuthData>,
-    #[serde(default)]
+    #[serde(default, alias = "gcloud_adc_oauth")]
     pub gcloud_adc_oauth: Option<OAuthData>,
-    #[serde(default)]
+    #[serde(default, alias = "gcloud_legacy_oauth")]
     pub gcloud_legacy_oauth: Option<OAuthData>,
 
     // --- V3 legacy OAuth ---
@@ -264,10 +268,11 @@ impl AccountData {
 #[serde(rename_all = "camelCase")]
 pub struct CredentialsFile {
     pub accounts: HashMap<String, AccountData>,
+    #[serde(default, alias = "active_account")]
     pub active_account: Option<String>,
     #[serde(default)]
     pub version: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, alias = "last_updated")]
     pub last_updated: Option<String>,
 }
 
