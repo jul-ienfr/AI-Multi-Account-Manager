@@ -89,9 +89,18 @@
     try {
       systemdStatus = await getSystemdStatus();
     } catch { systemdStatus = "unavailable"; }
+
+    // Rafraîchissement auto des pairs toutes les 5s (statut connexion live)
+    const pollInterval = setInterval(() => {
+      if (cfg?.sync?.enabled) {
+        syncStore.load();
+      }
+    }, 5000);
+
     return () => {
       unsub1();
       unsub2();
+      clearInterval(pollInterval);
     };
   });
 
