@@ -8,6 +8,10 @@ name = "proxy"
 path = "src/lib.rs"
 doctest = false
 
+[[bin]]
+name = "anthrouter"
+path = "src/main.rs"
+
 [dependencies]
 ai-core = { path = "../core", package = "core" }
 tokio = { workspace = true }

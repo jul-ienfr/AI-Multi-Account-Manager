@@ -1,75 +1,110 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { invoke } from "@tauri-apps/api/core";
+
+function mockFetchOnce(data: unknown, ok = true) {
+  vi.mocked(fetch).mockResolvedValueOnce({
+    ok,
+    json: () => Promise.resolve(data),
+  } as Response);
+}
 
 describe("tauri IPC wrapper", () => {
   beforeEach(() => {
-    vi.mocked(invoke).mockReset();
+    vi.mocked(fetch).mockReset();
   });
 
-  it("getAccounts calls invoke with correct command", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce([]);
+  it("getAccounts calls GET /accounts", async () => {
+    mockFetchOnce([]);
     const { getAccounts } = await import("../lib/tauri");
     const result = await getAccounts();
-    expect(invoke).toHaveBeenCalledWith("get_accounts");
+    expect(fetch).toHaveBeenCalledWith("/ai-manager/admin/api/accounts");
     expect(result).toEqual([]);
   });
 
-  it("switchAccount sends key parameter", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+  it("switchAccount sends POST /accounts/:key/switch (no body)", async () => {
+    mockFetchOnce(undefined);
     const { switchAccount } = await import("../lib/tauri");
     await switchAccount("alice");
-    expect(invoke).toHaveBeenCalledWith("switch_account", { key: "alice" });
+    expect(fetch).toHaveBeenCalledWith(
+      "/ai-manager/admin/api/accounts/alice/switch",
+      expect.objectContaining({ method: "POST" })
+    );
   });
 
-  it("addAccount sends key and data", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+  it("addAccount sends POST /accounts with data as body", async () => {
+    mockFetchOnce(undefined);
     const { addAccount } = await import("../lib/tauri");
     await addAccount("bob", { name: "Bob", provider: "gemini" });
-    expect(invoke).toHaveBeenCalledWith("add_account", {
-      key: "bob",
-      data: { name: "Bob", provider: "gemini" },
-    });
+    expect(fetch).toHaveBeenCalledWith(
+      "/ai-manager/admin/api/accounts",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ name: "Bob", provider: "gemini" }),
+      })
+    );
   });
 
-  it("setConfig sends config object", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+  it("setConfig sends PUT /config with config as body", async () => {
+    mockFetchOnce(undefined);
     const { setConfig } = await import("../lib/tauri");
     await setConfig({ refreshIntervalSecs: 120 });
-    expect(invoke).toHaveBeenCalledWith("set_config", { config: { refreshIntervalSecs: 120 } });
+    expect(fetch).toHaveBeenCalledWith(
+      "/ai-manager/admin/api/config",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ refreshIntervalSecs: 120 }),
+      })
+    );
   });
 
-  it("startProxy sends kind parameter", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+  it("startProxy sends POST /proxy/start with kind", async () => {
+    mockFetchOnce(undefined);
     const { startProxy } = await import("../lib/tauri");
     await startProxy("router");
-    expect(invoke).toHaveBeenCalledWith("start_proxy", { kind: "router" });
+    expect(fetch).toHaveBeenCalledWith(
+      "/ai-manager/admin/api/proxy/start",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ kind: "router" }) })
+    );
   });
 
-  it("stopProxy sends kind parameter", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+  it("stopProxy sends POST /proxy/stop with kind", async () => {
+    mockFetchOnce(undefined);
     const { stopProxy } = await import("../lib/tauri");
     await stopProxy("impersonator");
-    expect(invoke).toHaveBeenCalledWith("stop_proxy", { kind: "impersonator" });
+    expect(fetch).toHaveBeenCalledWith(
+      "/ai-manager/admin/api/proxy/stop",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ kind: "impersonator" }) })
+    );
   });
 
-  it("addPeer sends host and port", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+  it("addPeer sends POST /peers with host and port", async () => {
+    mockFetchOnce(undefined);
     const { addPeer } = await import("../lib/tauri");
     await addPeer("192.168.1.10", 9090);
-    expect(invoke).toHaveBeenCalledWith("add_peer", { host: "192.168.1.10", port: 9090 });
+    expect(fetch).toHaveBeenCalledWith(
+      "/ai-manager/admin/api/peers",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ host: "192.168.1.10", port: 9090 }),
+      })
+    );
   });
 
-  it("getQuotaHistory sends key and period", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce([]);
+  it("getQuotaHistory sends GET /monitoring/quota-history?key=...&period=...", async () => {
+    mockFetchOnce([]);
     const { getQuotaHistory } = await import("../lib/tauri");
-    await getQuotaHistory("alice", "24h");
-    expect(invoke).toHaveBeenCalledWith("get_quota_history", { key: "alice", period: "24h" });
+    const result = await getQuotaHistory("alice", "24h");
+    expect(fetch).toHaveBeenCalledWith(
+      "/ai-manager/admin/api/monitoring/quota-history?key=alice&period=24h"
+    );
+    expect(result).toEqual([]);
   });
 
-  it("getLogs sends optional filter", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce([]);
+  it("getLogs sends GET /monitoring/logs?filter=...", async () => {
+    mockFetchOnce([]);
     const { getLogs } = await import("../lib/tauri");
     await getLogs("error");
-    expect(invoke).toHaveBeenCalledWith("get_logs", { filter: "error" });
+    expect(fetch).toHaveBeenCalledWith(
+      "/ai-manager/admin/api/monitoring/logs?filter=error"
+    );
   });
 });

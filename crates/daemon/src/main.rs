@@ -23,6 +23,7 @@ use tracing_subscriber::EnvFilter;
 use ai_core::config::ConfigCache;
 use ai_core::credentials::CredentialsCache;
 use ai_core::event_log::EventLog;
+use ai_core::types::{ProxyInstanceRuntime, ProxyStatus};
 use daemon::http_api::DaemonState;
 use daemon::refresh_loop::RefreshLoop;
 use daemon::watchdog::CredentialsWatchdog;
@@ -269,7 +270,7 @@ async fn start_daemon(cli: Cli) -> Result<()> {
     };
 
     // Synchronisation P2P (optionnelle)
-    let sync_handle = if sync_enabled {
+    let sync_bus_arc: Option<Arc<ai_sync::bus::SyncBus>> = if sync_enabled {
         let key = parse_sync_key(sync_key_raw.as_deref())?;
         let bus = Arc::new(ai_sync::bus::SyncBus::new(
             generate_instance_id(),
@@ -278,20 +279,26 @@ async fn start_daemon(cli: Cli) -> Result<()> {
         ));
         bus.start().await.with_context(|| "starting sync bus")?;
 
-        // Connecter les pairs configurés manuellement dans settings.json
+        // Connecter les pairs configurés dans settings.json
         for peer_cfg in &sync_cfg.peers {
             let protocol = ai_sync::compat::PeerProtocol::Unknown;
             info!("Connecting to configured peer: {}:{} (id={})", peer_cfg.host, peer_cfg.port, peer_cfg.id);
             bus.connect_peer(&peer_cfg.id, &peer_cfg.host, peer_cfg.port, protocol).await;
         }
 
+        Some(bus)
+    } else {
+        info!("P2P sync disabled");
+        None
+    };
+
+    let sync_handle = if let Some(ref bus) = sync_bus_arc {
         let instance_id = bus.instance_id().to_string();
         let coordinator = Arc::new(ai_sync::coordinator::SyncCoordinator::new(
             instance_id,
-            Arc::clone(&bus),
+            Arc::clone(bus),
             Arc::clone(&credentials),
         ));
-
         let coord_rx = shutdown_rx.clone();
         let coord = Arc::clone(&coordinator);
         Some(tokio::spawn(async move {
@@ -300,7 +307,6 @@ async fn start_daemon(cli: Cli) -> Result<()> {
             }
         }))
     } else {
-        info!("P2P sync disabled");
         None
     };
 
@@ -336,10 +342,25 @@ async fn start_daemon(cli: Cli) -> Result<()> {
         let event_log = Arc::new(EventLog::new(
             creds_path.parent().unwrap_or(&creds_path),
         ));
+        // Pré-peupler la HashMap runtime depuis la config (probe peut alors mettre à jour les statuts)
+        let initial_proxy_instances: HashMap<String, Arc<ProxyInstanceRuntime>> = {
+            config.read().proxy.instances.iter().map(|inst| {
+                let rt = Arc::new(ProxyInstanceRuntime {
+                    status: parking_lot::RwLock::new(ProxyStatus {
+                        port: inst.port,
+                        ..Default::default()
+                    }),
+                    task_handle: parking_lot::Mutex::new(None),
+                    child_process: parking_lot::Mutex::new(None),
+                    started_at: parking_lot::Mutex::new(None),
+                });
+                (inst.id.clone(), rt)
+            }).collect()
+        };
         let daemon_state = Arc::new(DaemonState {
             credentials: Arc::clone(&credentials),
             config: Arc::clone(&config),
-            proxy_instances: Arc::new(RwLock::new(HashMap::new())),
+            proxy_instances: Arc::new(RwLock::new(initial_proxy_instances)),
             peers: Arc::new(RwLock::new(Vec::new())),
             velocity_calculators: Arc::new(RwLock::new(HashMap::new())),
             quota_metrics: Arc::new(RwLock::new(HashMap::new())),
@@ -350,6 +371,7 @@ async fn start_daemon(cli: Cli) -> Result<()> {
             http_client: reqwest::Client::new(),
             api_token: cli.api_token,
             shutdown_tx: shutdown_tx.clone(),
+            sync_bus: sync_bus_arc.clone(),
         });
         let api_rx = shutdown_rx.clone();
         Some(tokio::spawn(async move {

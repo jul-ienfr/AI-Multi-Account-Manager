@@ -10,6 +10,7 @@ use serde_json::json;
 
 use ai_core::config::PeerConfig;
 use ai_core::types::Peer;
+use tracing::info;
 
 use crate::dto::{AddPeerData, SetKeyData, TestPeerData};
 use super::{DaemonState, error_json, ok_json};
@@ -62,6 +63,9 @@ pub async fn add_peer(
         last_seen: None,
     };
 
+    let host = body.host.clone();
+    let port = body.port;
+
     let peer_config = PeerConfig {
         id: id.clone(),
         host: body.host,
@@ -71,6 +75,13 @@ pub async fn add_peer(
     state.peers.write().push(peer);
     state.config.write().sync.peers.push(peer_config);
     let _ = state.config.persist();
+
+    // Connecter immédiatement via le SyncBus si disponible
+    if let Some(bus) = &state.sync_bus {
+        let protocol = ai_sync::compat::PeerProtocol::Unknown;
+        bus.connect_peer(&id, &host, port, protocol).await;
+        info!("P2P: initiated connection to peer {} @ {}:{}", id, host, port);
+    }
 
     ok_json(json!({"ok": true, "id": id}))
 }
@@ -87,6 +98,10 @@ pub async fn remove_peer(
     state.peers.write().retain(|p| p.id != id);
     state.config.write().sync.peers.retain(|p| p.id != id);
     let _ = state.config.persist();
+
+    if let Some(bus) = &state.sync_bus {
+        bus.remove_peer(&id);
+    }
 
     ok_json(json!({"ok": true}))
 }

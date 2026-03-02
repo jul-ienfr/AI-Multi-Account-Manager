@@ -40,7 +40,7 @@ function createProxyInstancesStore() {
   return {
     subscribe,
     load: async () => {
-      const instances = await api.getProxyInstances();
+      const instances = await api.probeProxyInstances();
       set(instances);
     },
     probe: async () => {
@@ -54,7 +54,7 @@ function createProxyInstancesStore() {
     },
     update: async (id: string, updates: Partial<ProxyInstanceConfig>) => {
       await api.updateProxyInstance(id, updates);
-      const instances = await api.getProxyInstances();
+      const instances = await api.probeProxyInstances();
       set(instances);
     },
     remove: async (id: string) => {
@@ -74,7 +74,8 @@ function createProxyInstancesStore() {
     },
     restart: async (id: string) => {
       await api.restartProxyInstance(id);
-      const instances = await api.getProxyInstances();
+      await new Promise((r) => setTimeout(r, 500));
+      const instances = await api.probeProxyInstances();
       set(instances);
     },
   };

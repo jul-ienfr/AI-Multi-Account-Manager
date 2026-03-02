@@ -87,6 +87,20 @@ async fn probe_proxy_health(client: &reqwest::Client, port: u16) -> Option<Strin
 }
 
 // ---------------------------------------------------------------------------
+// Helper — lire le statut avec uptime calculé depuis started_at
+// ---------------------------------------------------------------------------
+
+fn status_with_uptime(rt: &ProxyInstanceRuntime) -> ProxyStatus {
+    let mut s = rt.status.read().clone();
+    if s.running {
+        if let Some(started) = *rt.started_at.lock() {
+            s.uptime_secs = started.elapsed().as_secs();
+        }
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------
 // Helper interne — stop par id
 // ---------------------------------------------------------------------------
 
@@ -108,7 +122,9 @@ async fn stop_instance_by_id(state: &DaemonState, id: &str) -> Result<(), String
         let mut s = runtime.status.write();
         s.running = false;
         s.pid = None;
+        s.uptime_secs = 0;
     }
+    *runtime.started_at.lock() = None;
     info!("Proxy instance '{}' stopped", id);
     Ok(())
 }
@@ -159,6 +175,7 @@ async fn start_instance_by_id(state: &DaemonState, id: &str) -> Result<(), Strin
             s.port = port;
             s.pid = Some(pid);
         }
+        *runtime.started_at.lock() = Some(std::time::Instant::now());
         *runtime.child_process.lock() = Some(child);
         info!(
             "Proxy '{}' started (external pid={}) on port {}",
@@ -173,6 +190,7 @@ async fn start_instance_by_id(state: &DaemonState, id: &str) -> Result<(), Strin
         let status_ref = runtime.clone();
         let id_label = id.to_string();
 
+        *runtime.started_at.lock() = Some(std::time::Instant::now());
         let join = tokio::task::spawn(async move {
             {
                 let mut s = status_ref.status.write();
@@ -211,7 +229,7 @@ pub async fn proxy_status(State(state): State<Arc<DaemonState>>) -> impl IntoRes
         .map(|inst| {
             let status = instances_rt
                 .get(&inst.id)
-                .map(|rt| rt.status.read().clone())
+                .map(|rt| status_with_uptime(rt))
                 .unwrap_or_else(|| ProxyStatus {
                     port: inst.port,
                     ..Default::default()
@@ -346,7 +364,7 @@ pub async fn list_instances(State(state): State<Arc<DaemonState>>) -> impl IntoR
         .map(|inst| {
             let status = instances_rt
                 .get(&inst.id)
-                .map(|rt| rt.status.read().clone())
+                .map(|rt| status_with_uptime(rt))
                 .unwrap_or_else(|| ProxyStatus {
                     port: inst.port,
                     ..Default::default()
@@ -386,6 +404,7 @@ pub async fn add_instance(
             }),
             task_handle: Mutex::new(None),
             child_process: Mutex::new(None),
+            started_at: Mutex::new(None),
         });
         state
             .proxy_instances
@@ -579,8 +598,15 @@ pub async fn probe_instances(State(state): State<Arc<DaemonState>>) -> impl Into
         let instances_rt = state.proxy_instances.read();
         for (id, port, backend) in &results {
             if let Some(rt) = instances_rt.get(id) {
-                let mut s = rt.status.write();
                 if let Some(backend_name) = backend {
+                    // Première détection : enregistrer l'heure de démarrage
+                    {
+                        let mut sa = rt.started_at.lock();
+                        if sa.is_none() {
+                            *sa = Some(std::time::Instant::now());
+                        }
+                    }
+                    let mut s = rt.status.write();
                     s.running = true;
                     s.port = *port;
                     s.backend = Some(backend_name.clone());
@@ -590,8 +616,11 @@ pub async fn probe_instances(State(state): State<Arc<DaemonState>>) -> impl Into
                     );
                 } else {
                     // Plus de réponse : marque stopped uniquement si pas démarré localement
+                    let mut s = rt.status.write();
                     s.running = false;
                     s.backend = None;
+                    drop(s);
+                    *rt.started_at.lock() = None;
                 }
             }
         }
@@ -623,53 +652,81 @@ pub async fn list_binaries() -> impl IntoResponse {
         }
     }
 
+    let candidates = [
+        (
+            "router-rust",
+            "anthrouter",
+            "anthrouter/anthrouter.exe",
+            18080u16,
+        ),
+        (
+            "impersonator-rust",
+            "claude-impersonator",
+            "claude-impersonator.exe",
+            18081,
+        ),
+        (
+            "translator-rust",
+            "claude-translator",
+            "claude-translator.exe",
+            18082,
+        ),
+    ];
+
+    // Dossiers de recherche : dossier "AI Manager" remonté + dossier du daemon lui-même
+    let search_dirs = [root.as_path(), exe_dir];
+
     let mut binaries: Vec<DetectedBinary> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // anthrouter: check multiple build output paths
-    let anthrouter_paths = [
-        "anthrouter/target/x86_64-pc-windows-gnu/release/anthrouter.exe",
-        "anthrouter/target/release/anthrouter.exe",
-        "anthrouter/target/release/anthrouter",
-        "anthrouter/anthrouter.exe",
-        "anthrouter/anthrouter",
-    ];
-    for rel in &anthrouter_paths {
-        let p = root.join(rel);
-        if p.exists() {
-            binaries.push(DetectedBinary {
-                id: "router-rust".to_string(),
-                name: "anthrouter".to_string(),
-                path: p.to_string_lossy().to_string(),
-                default_port: 18080,
-            });
-            break;
-        }
-    }
-
-    // Other legacy binaries (standalone executables)
-    let legacy_candidates = [
-        ("impersonator-rust", "claude-impersonator", "claude-impersonator.exe", 18081u16),
-        ("translator-rust", "claude-translator", "claude-translator.exe", 18082),
-    ];
-    for (id, name, rel_path, port) in &legacy_candidates {
-        let full_path = root.join(rel_path);
-        if full_path.exists() {
-            binaries.push(DetectedBinary {
-                id: id.to_string(),
-                name: name.to_string(),
-                path: full_path.to_string_lossy().to_string(),
-                default_port: *port,
-            });
+    for (id, name, rel_path, port) in &candidates {
+        if seen_ids.contains(*id) {
             continue;
         }
-        let linux_path = root.join(rel_path.trim_end_matches(".exe"));
-        if linux_path.exists() {
-            binaries.push(DetectedBinary {
-                id: id.to_string(),
-                name: name.to_string(),
-                path: linux_path.to_string_lossy().to_string(),
-                default_port: *port,
-            });
+        // Essai dans chaque dossier de recherche
+        'dir_loop: for dir in &search_dirs {
+            // Chemin relatif (avec sous-dossier éventuel)
+            let full_path = dir.join(rel_path);
+            if full_path.exists() {
+                binaries.push(DetectedBinary {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    path: full_path.to_string_lossy().to_string(),
+                    default_port: *port,
+                });
+                seen_ids.insert(id.to_string());
+                break 'dir_loop;
+            }
+            // Essai sans .exe (Linux)
+            let linux_path = dir.join(rel_path.trim_end_matches(".exe"));
+            if linux_path.exists() {
+                binaries.push(DetectedBinary {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    path: linux_path.to_string_lossy().to_string(),
+                    default_port: *port,
+                });
+                seen_ids.insert(id.to_string());
+                break 'dir_loop;
+            }
+            // Essai avec juste le nom du binaire dans le dossier courant
+            let bin_name = std::path::Path::new(rel_path)
+                .file_name()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or("")
+                .trim_end_matches(".exe");
+            let direct_path = dir.join(bin_name);
+            if direct_path.exists() {
+                binaries.push(DetectedBinary {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    path: direct_path.to_string_lossy().to_string(),
+                    default_port: *port,
+                });
+                seen_ids.insert(id.to_string());
+                break 'dir_loop;
+            }
         }
     }
 

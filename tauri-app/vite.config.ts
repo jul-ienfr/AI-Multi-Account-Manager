@@ -8,21 +8,22 @@ export default defineConfig({
     tailwindcss(),
     svelte(),
   ],
+  base: "/ai-manager/admin/",
   clearScreen: false,
   server: {
     port: 1420,
     strictPort: true,
     watch: { ignored: ["**/src-tauri/**"] },
   },
-  envPrefix: ["VITE_", "TAURI_ENV_*"],
   resolve: {
     conditions: ["browser", "import", "module", "default"],
   },
   build: {
-    target:
-      process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
-    minify: process.env.TAURI_ENV_DEBUG ? false : "esbuild",
-    sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    target: "esnext",
+    minify: "esbuild",
+    sourcemap: false,
+    outDir: "/home/jul/code/openclaw-studio/public/ai-manager/admin",
+    emptyOutDir: true,
   },
   test: {
     globals: true,

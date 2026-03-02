@@ -31,7 +31,14 @@
   let isImpersonator = $derived(instance.config.kind === "impersonator");
 
   let engineName = $derived(() => {
-    // Si le proxy a été détecté par probe, afficher le backend
+    // Si un binaire externe est configuré, l'afficher en priorité
+    if (instance.config.binaryPath) {
+      const bin = detectedBinaries.find((b) => b.path === instance.config.binaryPath);
+      if (bin) return bin.name;
+      const parts = instance.config.binaryPath.replace(/\\/g, "/").split("/");
+      return parts[parts.length - 1] || "Externe";
+    }
+    // Sinon utiliser le backend détecté par probe
     if (instance.status.backend) {
       const b = instance.status.backend;
       if (b === "python") return "V2 (Python)";
@@ -39,11 +46,7 @@
       if (b === "unknown") return "Externe";
       return `Externe (${b})`;
     }
-    if (!instance.config.binaryPath) return "Integre";
-    const bin = detectedBinaries.find((b) => b.path === instance.config.binaryPath);
-    if (bin) return bin.name;
-    const parts = instance.config.binaryPath.replace(/\\/g, "/").split("/");
-    return parts[parts.length - 1] || "Externe";
+    return "Integre";
   });
 
   function formatUptime(secs: number | undefined | null): string {
@@ -95,7 +98,7 @@
     await proxyInstances.update(instance.config.id, {
       name: editName,
       port: editPort,
-      binaryPath: editBinaryPath || undefined,
+      binaryPath: editBinaryPath || null,
     } as any);
     editing = false;
   }

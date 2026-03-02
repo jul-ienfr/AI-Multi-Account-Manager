@@ -126,6 +126,7 @@ impl QuotaInfo {
 
 /// Statut d'un proxy (router ou impersonator).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProxyStatus {
     /// Le proxy est-il en cours d'exécution ?
     pub running: bool,
@@ -236,6 +237,8 @@ pub struct ProxyInstanceRuntime {
     pub status: parking_lot::RwLock<ProxyStatus>,
     pub task_handle: parking_lot::Mutex<Option<tokio::task::AbortHandle>>,
     pub child_process: parking_lot::Mutex<Option<std::process::Child>>,
+    /// Instant where the proxy was detected/started (used to compute uptime_secs).
+    pub started_at: parking_lot::Mutex<Option<std::time::Instant>>,
 }
 
 // ---------------------------------------------------------------------------

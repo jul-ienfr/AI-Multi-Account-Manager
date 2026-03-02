@@ -26,6 +26,7 @@ use ai_core::credentials::CredentialsCache;
 use ai_core::event_log::EventLog;
 use ai_core::quota::VelocityCalculator;
 use ai_core::types::{Peer, ProxyInstanceRuntime, QuotaMetricsCache};
+use ai_sync::bus::SyncBus;
 
 pub mod accounts;
 pub mod config;
@@ -59,6 +60,8 @@ pub struct DaemonState {
     /// Bearer token optionnel. Si None → accès libre.
     pub api_token: Option<String>,
     pub shutdown_tx: watch::Sender<bool>,
+    /// SyncBus P2P (None si sync désactivé).
+    pub sync_bus: Option<Arc<SyncBus>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -136,10 +139,10 @@ pub async fn serve(
         .route("/accounts", get(accounts::list_accounts).post(accounts::add_account))
         .route("/accounts/active", get(accounts::get_active))
         .route("/accounts/capture-before-switch", post(accounts::capture_before_switch))
-        .route("/accounts/:key", put(accounts::update_account).delete(accounts::delete_account))
-        .route("/accounts/:key/switch", post(accounts::switch_account))
-        .route("/accounts/:key/refresh", post(accounts::refresh_account))
-        .route("/accounts/:key/revoke", post(accounts::revoke_account))
+        .route("/accounts/{key}", put(accounts::update_account).delete(accounts::delete_account))
+        .route("/accounts/{key}/switch", post(accounts::switch_account))
+        .route("/accounts/{key}/refresh", post(accounts::refresh_account))
+        .route("/accounts/{key}/revoke", post(accounts::revoke_account))
         // ── Config ───────────────────────────────────────────────────────
         .route("/config", get(config::get_config).put(config::set_config))
         // ── Proxy legacy ─────────────────────────────────────────────────
@@ -150,10 +153,10 @@ pub async fn serve(
         // ── Proxy instances ──────────────────────────────────────────────
         .route("/proxy-instances", get(proxy::list_instances).post(proxy::add_instance))
         .route("/proxy-instances/probe", post(proxy::probe_instances))
-        .route("/proxy-instances/:id", put(proxy::update_instance).delete(proxy::delete_instance))
-        .route("/proxy-instances/:id/start", post(proxy::start_instance))
-        .route("/proxy-instances/:id/stop", post(proxy::stop_instance))
-        .route("/proxy-instances/:id/restart", post(proxy::restart_instance))
+        .route("/proxy-instances/{id}", put(proxy::update_instance).delete(proxy::delete_instance))
+        .route("/proxy-instances/{id}/start", post(proxy::start_instance))
+        .route("/proxy-instances/{id}/stop", post(proxy::stop_instance))
+        .route("/proxy-instances/{id}/restart", post(proxy::restart_instance))
         .route("/proxy-binaries", get(proxy::list_binaries))
         // ── Sync P2P ─────────────────────────────────────────────────────
         .route("/sync/status", get(sync::sync_status))
@@ -161,12 +164,12 @@ pub async fn serve(
         .route("/sync/key/set", post(sync::set_key))
         .route("/peers", get(sync::list_peers).post(sync::add_peer))
         .route("/peers/test", post(sync::test_peer))
-        .route("/peers/:id", delete(sync::remove_peer))
+        .route("/peers/{id}", delete(sync::remove_peer))
         // ── SSH ──────────────────────────────────────────────────────────
         .route("/ssh/hostname", get(ssh::get_hostname))
         .route("/ssh-hosts", post(ssh::add_ssh_host))
         .route("/ssh-hosts/test", post(ssh::test_ssh))
-        .route("/ssh-hosts/:id", delete(ssh::remove_ssh_host))
+        .route("/ssh-hosts/{id}", delete(ssh::remove_ssh_host))
         // ── Monitoring ───────────────────────────────────────────────────
         .route("/monitoring/quota-history", get(monitoring::quota_history))
         .route("/monitoring/switch-history", get(monitoring::switch_history))
@@ -180,7 +183,7 @@ pub async fn serve(
         .route("/credentials/capture", post(credentials::capture_token))
         // ── Profils ──────────────────────────────────────────────────────
         .route("/profiles", get(profiles::list_profiles).post(profiles::save_profile))
-        .route("/profiles/:name", get(profiles::load_profile).delete(profiles::delete_profile))
+        .route("/profiles/{name}", get(profiles::load_profile).delete(profiles::delete_profile))
         // ── Intégrations ─────────────────────────────────────────────────
         .route("/setup/claude-code", post(integrations::setup_cc).delete(integrations::remove_cc))
         .route("/setup/vscode", post(integrations::setup_vscode).delete(integrations::remove_vscode))

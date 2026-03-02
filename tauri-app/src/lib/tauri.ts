@@ -1,100 +1,223 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import type { AccountState, AppConfig, ProxyStatus, ProxyInstanceState, ProxyInstanceConfig, Peer, QuotaInfo, AccountData, QuotaHistoryPoint, SwitchEntry, ImpersonationProfile, ScannedCredential, CaptureResult } from "./types";
 
-// Comptes
-export const getAccounts = () => invoke<AccountState[]>("get_accounts");
-export const getActiveAccount = () => invoke<AccountState | null>("get_active_account");
-export const switchAccount = (key: string) => invoke<void>("switch_account", { key });
-export const refreshAccount = (key: string) => invoke<void>("refresh_account", { key });
-export const addAccount = (key: string, data: Partial<AccountData>) => invoke<void>("add_account", { key, data });
-export const updateAccount = (key: string, updates: { priority?: number; autoSwitchDisabled?: boolean; displayName?: string }) => invoke<void>("update_account", { key, updates });
-export const deleteAccount = (key: string) => invoke<void>("delete_account", { key });
+const API_BASE = "/ai-manager/admin/api";
+const WS_URL = "/ai-manager/admin/ws";
 
-// Config
-export const getConfig = () => invoke<AppConfig>("get_config");
-export const setConfig = (config: Partial<AppConfig>) => invoke<void>("set_config", { config });
+// --- HTTP helpers ---
 
-// Proxy (legacy)
-export const getProxyStatus = () => invoke<{ router: ProxyStatus; impersonator: ProxyStatus }>("get_proxy_status");
-export const startProxy = (kind: "router" | "impersonator") => invoke<void>("start_proxy", { kind });
-export const stopProxy = (kind: "router" | "impersonator") => invoke<void>("stop_proxy", { kind });
-export const restartProxy = (kind: "router" | "impersonator") => invoke<void>("restart_proxy", { kind });
+async function get<T>(path: string, params?: Record<string, string | undefined>): Promise<T> {
+  let url = `${API_BASE}/${path}`;
+  if (params) {
+    const qs = new URLSearchParams(
+      Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined)) as Record<string, string>
+    ).toString();
+    if (qs) url += `?${qs}`;
+  }
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
 
-// Proxy instances (dynamic)
-export const getProxyInstances = () => invoke<ProxyInstanceState[]>("get_proxy_instances");
-export const addProxyInstance = (config: ProxyInstanceConfig) => invoke<void>("add_proxy_instance", { config });
-export const updateProxyInstance = (id: string, updates: Partial<ProxyInstanceConfig>) => invoke<void>("update_proxy_instance", { id, updates });
-export const deleteProxyInstance = (id: string) => invoke<void>("delete_proxy_instance", { id });
-export const startProxyInstance = (id: string) => invoke<void>("start_proxy_instance", { id });
-export const stopProxyInstance = (id: string) => invoke<void>("stop_proxy_instance", { id });
-export const restartProxyInstance = (id: string) => invoke<void>("restart_proxy_instance", { id });
-export const detectProxyBinaries = () => invoke<Array<{ id: string; name: string; path: string; defaultPort: number }>>("detect_proxy_binaries");
-export const probeProxyInstances = () => invoke<ProxyInstanceState[]>("probe_proxy_instances");
+async function post<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(`POST ${path} failed: ${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
 
-// Setup injection
-export const setupClaudeCode = (port: number) => invoke<void>("setup_claude_code", { port });
-export const removeClaudeCodeSetup = () => invoke<void>("remove_claude_code_setup");
-export const setupVscodeProxy = (port: number) => invoke<void>("setup_vscode_proxy", { port });
-export const removeVscodeProxy = () => invoke<void>("remove_vscode_proxy");
+async function put<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}/${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(`PUT ${path} failed: ${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
 
-// Systemd (daemon auto-start)
-export const getSystemdStatus = () => invoke<string>("get_systemd_status");
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${API_BASE}/${path}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`DELETE ${path} failed: ${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
+// --- WebSocket event bus ---
+
+type EventCallback = (payload: unknown) => void;
+
+let ws: WebSocket | null = null;
+const subscribers = new Map<string, Set<EventCallback>>();
+
+function getWs(): WebSocket {
+  if (ws && ws.readyState === WebSocket.OPEN) return ws;
+
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const url = `${protocol}//${location.host}${WS_URL}`;
+
+  ws = new WebSocket(url);
+
+  ws.addEventListener("message", (ev) => {
+    try {
+      const msg = JSON.parse(ev.data as string) as { event: string; payload: unknown };
+      const cbs = subscribers.get(msg.event);
+      if (cbs) cbs.forEach((cb) => cb(msg.payload));
+    } catch {
+      // ignore malformed messages
+    }
+  });
+
+  ws.addEventListener("close", () => {
+    ws = null;
+    if (subscribers.size > 0) {
+      setTimeout(() => getWs(), 2000);
+    }
+  });
+
+  return ws;
+}
+
+function subscribeEvent(event: string, cb: EventCallback): () => void {
+  if (!subscribers.has(event)) subscribers.set(event, new Set());
+  subscribers.get(event)!.add(cb);
+  getWs();
+  return () => {
+    subscribers.get(event)?.delete(cb);
+    if (subscribers.get(event)?.size === 0) subscribers.delete(event);
+  };
+}
+
+// --- Comptes --- GET /accounts, POST /accounts, PUT /accounts/:key, DELETE /accounts/:key
+export const getAccounts = () => get<AccountState[]>("accounts");
+export const getActiveAccount = () => get<AccountState | null>("accounts/active");
+export const switchAccount = (key: string) => post<void>(`accounts/${encodeURIComponent(key)}/switch`);
+export const refreshAccount = (key: string) => post<void>(`accounts/${encodeURIComponent(key)}/refresh`);
+export const revokeAccount = (key: string) => post<void>(`accounts/${encodeURIComponent(key)}/revoke`);
+export const addAccount = (_key: string, data: Partial<AccountData>) =>
+  post<void>("accounts", data);
+export const updateAccount = (key: string, updates: { priority?: number; autoSwitchDisabled?: boolean; displayName?: string }) =>
+  put<void>(`accounts/${encodeURIComponent(key)}`, updates);
+export const deleteAccount = (key: string) => del<void>(`accounts/${encodeURIComponent(key)}`);
+export const captureBeforeSwitch = (outgoingKey: string) =>
+  post<boolean>("accounts/capture-before-switch", { outgoingKey });
+
+// --- Config --- GET /config, PUT /config
+export const getConfig = () => get<AppConfig>("config");
+export const setConfig = (config: Partial<AppConfig>) => put<void>("config", config);
+
+// --- Proxy legacy --- GET /proxy/status, POST /proxy/start|stop|restart
+type ProxyInstance = { id: string; kind: string; pid: number | null; port: number; running: boolean; uptimeSecs: number; requestsTotal: number; requestsActive: number; backend?: string };
+export const getProxyStatus = () =>
+  get<{ instances: ProxyInstance[]; instances_count: number }>("proxy/status").then((r) => {
+    const byKind = (kind: string): ProxyStatus => {
+      const inst = r.instances.find((i) => i.kind === kind);
+      return {
+        running: inst?.running ?? false,
+        port: inst?.port ?? 0,
+        pid: inst?.pid ?? undefined,
+        uptimeSecs: inst?.uptimeSecs ?? 0,
+        requestsTotal: inst?.requestsTotal ?? 0,
+        requestsActive: inst?.requestsActive ?? 0,
+        backend: inst?.backend,
+      };
+    };
+    return { router: byKind("router"), impersonator: byKind("impersonator") };
+  });
+export const startProxy = (kind?: "router" | "impersonator") => post<void>("proxy/start", { kind });
+export const stopProxy = (kind?: "router" | "impersonator") => post<void>("proxy/stop", { kind });
+export const restartProxy = (kind?: "router" | "impersonator") => post<void>("proxy/restart", { kind });
+
+// --- Proxy instances --- GET/POST /proxy-instances, PUT/DELETE /proxy-instances/:id, etc.
+export const getProxyInstances = () => get<ProxyInstanceState[]>("proxy-instances");
+export const addProxyInstance = (config: ProxyInstanceConfig) => post<void>("proxy-instances", config);
+export const updateProxyInstance = (id: string, updates: Partial<ProxyInstanceConfig>) =>
+  put<void>(`proxy-instances/${encodeURIComponent(id)}`, updates);
+export const deleteProxyInstance = (id: string) => del<void>(`proxy-instances/${encodeURIComponent(id)}`);
+export const startProxyInstance = (id: string) => post<void>(`proxy-instances/${encodeURIComponent(id)}/start`);
+export const stopProxyInstance = (id: string) => post<void>(`proxy-instances/${encodeURIComponent(id)}/stop`);
+export const restartProxyInstance = (id: string) => post<void>(`proxy-instances/${encodeURIComponent(id)}/restart`);
+export const probeProxyInstances = () => post<ProxyInstanceState[]>("proxy-instances/probe");
+export const detectProxyBinaries = () =>
+  get<{ binaries: Array<{ id: string; name: string; path: string; defaultPort: number }> }>("proxy-binaries")
+    .then((r) => r.binaries);
+
+// --- Setup injection ---
+export const setupClaudeCode = (port: number) => post<void>("setup/claude-code", { port });
+export const removeClaudeCodeSetup = () => del<void>("setup/claude-code");
+export const setupVscodeProxy = (port: number) => post<void>("setup/vscode", { port });
+export const removeVscodeProxy = () => del<void>("setup/vscode");
+
+// --- Systemd ---
+export const getSystemdStatus = () =>
+  get<{ status: string }>("systemd/status").then((r) => r.status);
 export const installSystemdService = (daemonPath?: string) =>
-  invoke<string>("install_systemd_service", { daemonPath });
-export const uninstallSystemdService = () => invoke<string>("uninstall_systemd_service");
+  post<{ ok: boolean; message: string }>("systemd/install", { daemonPath }).then((r) => r.message);
+export const uninstallSystemdService = () =>
+  post<{ ok: boolean; message: string }>("systemd/uninstall").then((r) => r.message);
 
-// Sync
-export const getSyncStatus = () => invoke<{ enabled: boolean; peers: number }>("get_sync_status");
-export const getPeers = () => invoke<Peer[]>("get_peers");
-export const addPeer = (host: string, port: number) => invoke<void>("add_peer", { host, port });
-export const removePeer = (id: string) => invoke<void>("remove_peer", { id });
-export const generateSyncKey = () => invoke<string>("generate_sync_key");
-export const setSyncKey = (key: string) => invoke<void>("set_sync_key", { key });
-export const testPeerConnection = (host: string, port: number) => invoke<boolean>("test_peer_connection", { host, port });
+// --- Sync P2P ---
+export const getSyncStatus = () => get<{ enabled: boolean; peers: number }>("sync/status");
+export const generateSyncKey = () =>
+  post<{ key: string }>("sync/key/generate").then((r) => r.key);
+export const setSyncKey = (key: string) => post<void>("sync/key/set", { key });
 
-// SSH Sync
-export const getHostname = () => invoke<string>("get_hostname");
+// --- Peers ---
+export const getPeers = () => get<Peer[]>("peers");
+export const addPeer = (host: string, port: number, id?: string) => post<void>("peers", { host, port, id });
+export const removePeer = (id: string) => del<void>(`peers/${encodeURIComponent(id)}`);
+export const testPeerConnection = (host: string, port: number) =>
+  post<{ reachable: boolean }>("peers/test", { host, port }).then((r) => r.reachable);
+
+// --- SSH Sync ---
+export const getHostname = () =>
+  get<{ hostname: string }>("ssh/hostname").then((r) => r.hostname);
 export const addSshHost = (host: string, port: number, username: string, identityPath?: string) =>
-  invoke<void>("add_ssh_host", { host, port, username, identityPath });
-export const removeSshHost = (id: string) => invoke<void>("remove_ssh_host", { id });
+  post<void>("ssh-hosts", { host, port, username, identityPath });
+export const removeSshHost = (id: string) => del<void>(`ssh-hosts/${encodeURIComponent(id)}`);
 export const testSshConnection = (host: string, port: number, username: string, identityPath?: string) =>
-  invoke<boolean>("test_ssh_connection", { host, port, username, identityPath });
+  post<{ reachable: boolean }>("ssh-hosts/test", { host, port, username, identityPath }).then((r) => r.reachable);
 
-// Monitoring
+// --- Monitoring ---
 export const getQuotaHistory = (key: string, period?: "24h" | "7d" | "30d") =>
-  invoke<QuotaHistoryPoint[]>("get_quota_history", { key, period: period ?? "24h" });
-export const getSessions = () => invoke<unknown[]>("get_sessions");
-export const getLogs = (filter?: string) => invoke<unknown[]>("get_logs", { filter });
+  get<QuotaHistoryPoint[]>("monitoring/quota-history", { key, period });
+export const getSwitchHistory = () => get<SwitchEntry[]>("monitoring/switch-history");
+export const getImpersonationProfiles = () => get<ImpersonationProfile[]>("monitoring/profiles");
+export const getSessions = () => get<unknown[]>("monitoring/sessions");
+export const getLogs = (filter?: string) => get<unknown[]>("monitoring/logs", filter ? { filter } : undefined);
 
-export const getSwitchHistory = () =>
-  invoke<SwitchEntry[]>("get_switch_history");
-
-export const getImpersonationProfiles = () =>
-  invoke<ImpersonationProfile[]>("get_impersonation_profiles");
-
-// Scan & import automatique de credentials locaux
-export const scanLocalCredentials = () =>
-  invoke<ScannedCredential[]>("scan_local_credentials");
+// --- Credentials ---
+export const scanLocalCredentials = () => post<ScannedCredential[]>("credentials/scan");
 export const importScannedCredentials = (credentials: ScannedCredential[]) =>
-  invoke<number>("import_scanned_credentials", { credentials });
-
-// OAuth capture via Claude CLI
-export const findClaudeBinary = () =>
-  invoke<string>("find_claude_binary");
+  post<number>("credentials/import", { credentials });
+export const findClaudeBinary = () => get<string>("credentials/binary");
 export const captureOAuthToken = (timeoutSecs?: number) =>
-  invoke<CaptureResult>("capture_oauth_token", { timeoutSecs });
+  post<CaptureResult>("credentials/capture", { timeoutSecs });
 
-// Phase 3.4a — Capture token roté avant switch
-export const captureBeforeSwitch = (outgoingKey: string): Promise<boolean> =>
-  invoke<boolean>("capture_before_switch", { outgoingKey });
+// --- Profils ---
+export const getProfiles = () => get<Array<{ name: string; createdAt: string; sizeBytes: number }>>("profiles");
+export const saveProfile = (name: string, config: unknown) => post<void>("profiles", { name, config });
+export const loadProfile = (name: string) => get<unknown>(`profiles/${encodeURIComponent(name)}`);
+export const deleteProfile = (name: string) => del<void>(`profiles/${encodeURIComponent(name)}`);
 
-// Event listeners
-export const onQuotaUpdate = (cb: (data: { key: string; quota: QuotaInfo }) => void) =>
-  listen("quota_update", (e) => cb(e.payload as { key: string; quota: QuotaInfo }));
-export const onToast = (cb: (toast: { type: string; title: string; message?: string }) => void) =>
-  listen("toast", (e) => cb(e.payload as { type: string; title: string; message?: string }));
-export const onProxyStatus = (cb: (status: ProxyStatus) => void) =>
-  listen("proxy_status", (e) => cb(e.payload as ProxyStatus));
-export const onAccountSwitch = (cb: (key: string) => void) =>
-  listen("account_switch", (e) => cb(e.payload as string));
+// --- Stats ---
+export const getStats = () => get<unknown>("stats");
+
+// --- Health ---
+export const getHealth = () => get<{ status: string }>("health");
+
+// --- Event listeners (WebSocket) ---
+// Returns an unsubscribe function (same contract as Tauri's listen())
+
+export const onQuotaUpdate = (cb: (data: { key: string; quota: QuotaInfo }) => void): Promise<() => void> =>
+  Promise.resolve(subscribeEvent("quota_update", (payload) => cb(payload as { key: string; quota: QuotaInfo })));
+
+export const onToast = (cb: (toast: { type: string; title: string; message?: string }) => void): Promise<() => void> =>
+  Promise.resolve(subscribeEvent("toast", (payload) => cb(payload as { type: string; title: string; message?: string })));
+
+export const onProxyStatus = (cb: (status: ProxyStatus) => void): Promise<() => void> =>
+  Promise.resolve(subscribeEvent("proxy_status", (payload) => cb(payload as ProxyStatus)));
+
+export const onAccountSwitch = (cb: (key: string) => void): Promise<() => void> =>
+  Promise.resolve(subscribeEvent("account_switch", (payload) => cb(payload as string)));

@@ -1,20 +1,26 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { invoke } from "@tauri-apps/api/core";
 import { get } from "svelte/store";
 
-// Mock getAccounts to return test data
+// Mock accounts to return test data
 const mockAccounts = [
   { key: "alice", data: { name: "Alice", email: "alice@test.com", provider: "anthropic" }, isActive: true, quota: { tokens5h: 1000, limit5h: 45000000, tokens7d: 5000, limit7d: 180000000, phase: "Cruise", emaVelocity: 0 } },
   { key: "bob", data: { name: "Bob", provider: "gemini" }, isActive: false },
 ];
 
+function mockFetchOnce(data: unknown, ok = true) {
+  vi.mocked(fetch).mockResolvedValueOnce({
+    ok,
+    json: () => Promise.resolve(data),
+  } as Response);
+}
+
 describe("accounts store", () => {
   beforeEach(() => {
-    vi.mocked(invoke).mockReset();
+    vi.mocked(fetch).mockReset();
   });
 
   it("load() fetches accounts and populates store", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(mockAccounts);
+    mockFetchOnce(mockAccounts);
     const { accounts } = await import("../lib/stores/accounts");
     await accounts.load();
     const state = get(accounts);
@@ -23,50 +29,53 @@ describe("accounts store", () => {
   });
 
   it("switch() updates isActive locally", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(mockAccounts);
+    mockFetchOnce(mockAccounts);
     const { accounts } = await import("../lib/stores/accounts");
     await accounts.load();
-    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+    mockFetchOnce(undefined);
     await accounts.switch("bob");
     const state = get(accounts);
     expect(state.find((a) => a.key === "bob")?.isActive).toBe(true);
   });
 
   it("delete() removes account from store", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(mockAccounts);
+    mockFetchOnce(mockAccounts);
     const { accounts } = await import("../lib/stores/accounts");
     await accounts.load();
-    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+    mockFetchOnce(undefined);
     await accounts.delete("bob");
     const state = get(accounts);
     expect(state).toHaveLength(1);
     expect(state[0].key).toBe("alice");
   });
 
-  it("refresh() calls refreshAccount and reloads", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(mockAccounts);
+  it("refresh() calls refreshAccount on correct REST path and reloads", async () => {
+    mockFetchOnce(mockAccounts);
     const { accounts } = await import("../lib/stores/accounts");
     await accounts.load();
-    vi.mocked(invoke).mockResolvedValueOnce(undefined); // refreshAccount
-    vi.mocked(invoke).mockResolvedValueOnce(mockAccounts); // getAccounts
+    mockFetchOnce(undefined); // POST /accounts/alice/refresh
+    mockFetchOnce(mockAccounts); // GET /accounts
     await accounts.refresh("alice");
-    expect(invoke).toHaveBeenCalledWith("refresh_account", { key: "alice" });
-    expect(invoke).toHaveBeenCalledWith("get_accounts");
+    expect(fetch).toHaveBeenCalledWith(
+      "/ai-manager/admin/api/accounts/alice/refresh",
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(fetch).toHaveBeenCalledWith("/ai-manager/admin/api/accounts");
   });
 
   it("add() calls addAccount and reloads", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(mockAccounts);
+    mockFetchOnce(mockAccounts);
     const { accounts } = await import("../lib/stores/accounts");
     await accounts.load();
-    vi.mocked(invoke).mockResolvedValueOnce(undefined); // addAccount
-    vi.mocked(invoke).mockResolvedValueOnce([...mockAccounts, { key: "carol", data: { name: "Carol" }, isActive: false }]); // getAccounts
+    mockFetchOnce(undefined); // POST /accounts
+    mockFetchOnce([...mockAccounts, { key: "carol", data: { name: "Carol" }, isActive: false }]); // GET /accounts
     await accounts.add("carol", { name: "Carol" });
     const state = get(accounts);
     expect(state).toHaveLength(3);
   });
 
   it("activeAccount derived returns the active account", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(mockAccounts);
+    mockFetchOnce(mockAccounts);
     const { accounts, activeAccount } = await import("../lib/stores/accounts");
     await accounts.load();
     const active = get(activeAccount);

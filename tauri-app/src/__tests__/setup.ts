@@ -1,13 +1,7 @@
-// Mock Tauri API pour les tests
+// Mock fetch global pour les tests
 import { vi } from "vitest";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn().mockResolvedValue(undefined),
-}));
-
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn().mockResolvedValue(() => {}),
-}));
+vi.stubGlobal("fetch", vi.fn());
 
 // Mock localStorage
 const store: Record<string, string> = {};

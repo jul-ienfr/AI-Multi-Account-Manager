@@ -7,17 +7,12 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest",
     "test:run": "vitest run"
   },
   "dependencies": {
     "@rollup/rollup-linux-x64-gnu": "^4.59.0",
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-shell": "^2",
     "chart.js": "^4",
     "lucide-svelte": "latest",
     "svelte": "^5",
@@ -26,7 +21,6 @@
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^4",
     "@tailwindcss/vite": "^4",
-    "@tauri-apps/cli": "^2",
     "@testing-library/svelte": "^5",
     "@typescript-eslint/types": "^8.56.1",
     "@vitest/ui": "latest",
