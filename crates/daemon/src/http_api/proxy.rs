@@ -41,6 +41,8 @@ fn validate_binary_path(path: &str) -> Result<std::path::PathBuf, String> {
         .and_then(|n| n.to_str())
         .unwrap_or("");
     let allowed = [
+        "anthrouter",
+        "anthrouter.exe",
         "claude-router-auto",
         "claude-router-auto.exe",
         "claude-impersonator",
@@ -624,8 +626,8 @@ pub async fn list_binaries() -> impl IntoResponse {
     let candidates = [
         (
             "router-rust",
-            "claude-router-auto",
-            "claude-router-auto/claude-router-auto.exe",
+            "anthrouter",
+            "anthrouter/anthrouter.exe",
             18080u16,
         ),
         (

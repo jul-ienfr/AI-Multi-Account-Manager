@@ -265,7 +265,7 @@ fn fallback_headers(provider: &str) -> IndexMap<String, String> {
             h.insert("accept".to_string(), "application/json".to_string());
         }
         _ => {
-            h.insert("user-agent".to_string(), "anthroute/0.1.0".to_string());
+            h.insert("user-agent".to_string(), "anthrouter/0.1.0".to_string());
             h.insert("accept".to_string(), "application/json".to_string());
         }
     }

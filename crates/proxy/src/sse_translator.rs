@@ -1,4 +1,4 @@
-//! SSE stream translation layer for anthroute.
+//! SSE stream translation layer for anthrouter.
 //!
 //! This module provides two translators that convert Anthropic SSE events
 //! to other provider formats, for use when the router needs to forward
@@ -30,7 +30,7 @@ use serde_json::json;
 ///
 /// # Usage
 /// ```no_run
-/// use anthroute::sse_translator::SseAnthropicToOpenai;
+/// use anthrouter::sse_translator::SseAnthropicToOpenai;
 /// let mut t = SseAnthropicToOpenai::new("msg_abc".into(), "claude-sonnet-4-6".into());
 /// let out: bytes::Bytes = t.process_chunk(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
 /// ```

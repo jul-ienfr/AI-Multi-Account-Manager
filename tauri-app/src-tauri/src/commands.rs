@@ -1660,7 +1660,7 @@ pub async fn detect_proxy_binaries() -> Result<Vec<DetectedBinary>, String> {
     }
 
     let candidates = [
-        ("router-rust", "claude-router-auto", "claude-router-auto/claude-router-auto.exe", 18080u16),
+        ("router-rust", "anthrouter", "anthrouter/anthrouter.exe", 18080u16),
         ("impersonator-rust", "claude-impersonator", "claude-impersonator.exe", 18081),
         ("translator-rust", "claude-translator", "claude-translator.exe", 18082),
     ];
