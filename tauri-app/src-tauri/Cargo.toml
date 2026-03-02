@@ -30,6 +30,7 @@ dirs = { workspace = true }
 uuid = { workspace = true }
 hostname = "0.4"
 tauri-plugin-window-state = "2"
+sha2 = { workspace = true }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

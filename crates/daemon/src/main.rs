@@ -259,15 +259,10 @@ async fn start_daemon(cli: Cli) -> Result<()> {
     };
 
     // CredentialsWatchdog
-    let watchdog = Arc::new(CredentialsWatchdog::new(
+    let mut watchdog = CredentialsWatchdog::new(
         Arc::clone(&credentials),
         creds_path.clone(),
-    ));
-    let watchdog_rx = shutdown_rx.clone();
-    let watchdog_handle = {
-        let wd = Arc::clone(&watchdog);
-        tokio::spawn(async move { wd.run(watchdog_rx).await })
-    };
+    );
 
     // Synchronisation P2P (optionnelle)
     let sync_bus_arc: Option<Arc<ai_sync::bus::SyncBus>> = if sync_enabled {
@@ -283,6 +278,9 @@ async fn start_daemon(cli: Cli) -> Result<()> {
         // (pairs qui ne nous ont pas configuré comme peer, sync asymétrique)
         bus.set_credentials(Arc::clone(&credentials));
 
+        // Permet à la RefreshLoop de broadcaster les credentials après chaque refresh réussi.
+        refresh_loop.set_sync_bus(Arc::clone(&bus));
+
         // Connecter les pairs configurés dans settings.json
         for peer_cfg in &sync_cfg.peers {
             let protocol = ai_sync::compat::PeerProtocol::Unknown;
@@ -294,6 +292,17 @@ async fn start_daemon(cli: Cli) -> Result<()> {
     } else {
         info!("P2P sync disabled");
         None
+    };
+
+    // Wire sync_bus into watchdog, then spawn it
+    if let Some(bus) = &sync_bus_arc {
+        watchdog.set_sync_bus(Arc::clone(bus));
+    }
+    let watchdog = Arc::new(watchdog);
+    let watchdog_rx = shutdown_rx.clone();
+    let watchdog_handle = {
+        let wd = Arc::clone(&watchdog);
+        tokio::spawn(async move { wd.run(watchdog_rx).await })
     };
 
     let sync_handle = if let Some(ref bus) = sync_bus_arc {

@@ -53,18 +53,25 @@ fn oauth_to_dto(oauth: &OAuthData) -> OAuthSlotDto {
     }
 }
 
-fn quota_dto_from_state(state: &DaemonState, key: &str) -> Option<QuotaDto> {
+fn quota_dto_from_account(state: &DaemonState, key: &str, account: &AccountData) -> Option<QuotaDto> {
+    let tokens_5h = account.tokens_5h;
+    let tokens_7d = account.tokens_7d;
+    let limit_5h = account.quota_5h.unwrap_or(45_000_000);
+    let limit_7d = limit_5h * 4;
+
     let metrics = state.quota_metrics.read();
-    metrics.get(key).map(|m| QuotaDto {
-        tokens_5h: 0,
-        limit_5h: 0,
-        tokens_7d: 0,
-        limit_7d: 0,
+    let m = metrics.get(key);
+
+    Some(QuotaDto {
+        tokens_5h,
+        limit_5h,
+        tokens_7d,
+        limit_7d,
         phase: String::new(),
-        ema_velocity: m.ema_velocity,
-        time_to_threshold: m.time_to_threshold,
-        resets_at_5h: m.resets_at_5h.clone(),
-        resets_at_7d: m.resets_at_7d.clone(),
+        ema_velocity: m.map(|x| x.ema_velocity).unwrap_or(0.0),
+        time_to_threshold: m.and_then(|x| x.time_to_threshold),
+        resets_at_5h: m.and_then(|x| x.resets_at_5h.clone()),
+        resets_at_7d: m.and_then(|x| x.resets_at_7d.clone()),
         ..Default::default()
     })
 }
@@ -84,7 +91,7 @@ pub async fn list_accounts(State(state): State<Arc<DaemonState>>) -> impl IntoRe
         .map(|(key, account)| AccountStateDto {
             key: key.clone(),
             data: account_to_dto(account),
-            quota: quota_dto_from_state(&state, key),
+            quota: quota_dto_from_account(&state, key, account),
             is_active: active_key == Some(key.as_str()),
         })
         .collect();
@@ -105,7 +112,7 @@ pub async fn get_active(State(state): State<Arc<DaemonState>>) -> impl IntoRespo
             data.accounts.get(key).map(|account| AccountStateDto {
                 key: key.clone(),
                 data: account_to_dto(account),
-                quota: quota_dto_from_state(&state, key),
+                quota: quota_dto_from_account(&state, key, account),
                 is_active: true,
             })
         });
@@ -161,12 +168,24 @@ pub async fn add_account(
 
     state.credentials.write().accounts.insert(key, account);
 
-    state
+    let resp = state
         .credentials
         .persist()
         .map_err(|e| error_json(500, &e.to_string()))
         .map(|_| ok_json(json!({"ok": true})))
-        .unwrap_or_else(|e| e)
+        .unwrap_or_else(|e| e);
+
+    if let Some(bus) = state.sync_bus.clone() {
+        let creds = Arc::clone(&state.credentials);
+        tokio::spawn(async move {
+            if let Ok(accounts_json) = creds.export_json() {
+                let active_key = creds.active_key();
+                let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+            }
+        });
+    }
+
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -196,12 +215,24 @@ pub async fn update_account(
         }
     }
 
-    state
+    let resp = state
         .credentials
         .persist()
         .map_err(|e| error_json(500, &e.to_string()))
         .map(|_| ok_json(json!({"ok": true})))
-        .unwrap_or_else(|e| e)
+        .unwrap_or_else(|e| e);
+
+    if let Some(bus) = state.sync_bus.clone() {
+        let creds = Arc::clone(&state.credentials);
+        tokio::spawn(async move {
+            if let Ok(accounts_json) = creds.export_json() {
+                let active_key = creds.active_key();
+                let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+            }
+        });
+    }
+
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -230,12 +261,24 @@ pub async fn delete_account(
         }
     }
 
-    state
+    let resp = state
         .credentials
         .persist()
         .map_err(|e| error_json(500, &e.to_string()))
         .map(|_| ok_json(json!({"ok": true})))
-        .unwrap_or_else(|e| e)
+        .unwrap_or_else(|e| e);
+
+    if let Some(bus) = state.sync_bus.clone() {
+        let creds = Arc::clone(&state.credentials);
+        tokio::spawn(async move {
+            if let Ok(accounts_json) = creds.export_json() {
+                let active_key = creds.active_key();
+                let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+            }
+        });
+    }
+
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -270,12 +313,26 @@ pub async fn switch_account(
     // Update active account
     state.credentials.write().active_account = Some(key.clone());
 
-    state
+    let resp = state
         .credentials
         .persist()
         .map_err(|e| error_json(500, &e.to_string()))
         .map(|_| ok_json(json!({"ok": true, "switched_to": key})))
-        .unwrap_or_else(|e| e)
+        .unwrap_or_else(|e| e);
+
+    if let Some(bus) = state.sync_bus.clone() {
+        tracing::info!("[switch_account] sync_bus present, broadcasting AccountSwitch for {}", key);
+        let key_clone = key.clone();
+        tokio::spawn(async move {
+            if let Err(e) = bus.broadcast_account_switch(key_clone).await {
+                tracing::warn!("[switch_account] broadcast failed: {}", e);
+            }
+        });
+    } else {
+        tracing::info!("[switch_account] sync_bus is None, no broadcast");
+    }
+
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -303,10 +360,32 @@ pub async fn refresh_account(
             if let Err(e) = state.credentials.update_oauth(&key, new_oauth) {
                 return error_json(500, &e.to_string());
             }
+            if let Some(bus) = state.sync_bus.clone() {
+                let creds = Arc::clone(&state.credentials);
+                tokio::spawn(async move {
+                    if let Ok(accounts_json) = creds.export_json() {
+                        let active_key = creds.active_key();
+                        let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+                    }
+                });
+            }
             ok_json(json!({"ok": true}))
         }
         RefreshResult::InvalidGrant => {
             state.invalid_grant_accounts.write().insert(key.clone());
+            // Broadcast invalid_grant update to P2P peers
+            if let Some(bus) = state.sync_bus.clone() {
+                let ig_snapshot: Vec<String> = state.invalid_grant_accounts.read().iter().cloned().collect();
+                tokio::spawn(async move {
+                    let instance_id = bus.instance_id().to_string();
+                    let clock = bus.next_clock();
+                    let msg = ai_sync::messages::SyncMessage::new(
+                        &instance_id,
+                        ai_sync::messages::SyncPayload::InvalidGrantUpdate { invalid_keys: ig_snapshot, clock },
+                    );
+                    let _ = bus.broadcast(msg).await;
+                });
+            }
             error_json(422, "invalid_grant")
         }
         RefreshResult::Expired => {
@@ -354,12 +433,24 @@ pub async fn revoke_account(
         }
     }
 
-    state
+    let resp = state
         .credentials
         .persist()
         .map_err(|e| error_json(500, &e.to_string()))
         .map(|_| ok_json(json!({"ok": true})))
-        .unwrap_or_else(|e| e)
+        .unwrap_or_else(|e| e);
+
+    if let Some(bus) = state.sync_bus.clone() {
+        let creds = Arc::clone(&state.credentials);
+        tokio::spawn(async move {
+            if let Ok(accounts_json) = creds.export_json() {
+                let active_key = creds.active_key();
+                let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+            }
+        });
+    }
+
+    resp
 }
 
 // ---------------------------------------------------------------------------

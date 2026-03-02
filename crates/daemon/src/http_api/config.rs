@@ -72,5 +72,20 @@ pub async fn set_config(
         return error_json(500, &e.to_string());
     }
 
+    // Broadcast ConfigUpdate to P2P peers
+    if let Some(bus) = &state.sync_bus {
+        let bus = bus.clone();
+        let instance_id = bus.instance_id().to_string();
+        let config_json = serde_json::to_string(&*state.config.read()).unwrap_or_default();
+        tokio::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::ConfigUpdate { config_json, clock },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
+
     ok_json(serde_json::json!({"ok": true}))
 }

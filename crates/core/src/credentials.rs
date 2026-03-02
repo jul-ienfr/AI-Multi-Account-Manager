@@ -507,6 +507,9 @@ impl CredentialsCache {
             if let Some(account) = data.accounts.get_mut(key) {
                 account.tokens_5h = tokens_5h;
                 account.tokens_7d = tokens_7d;
+                // Met à jour last_refresh pour que le split quota fetch sache que ce
+                // compte a été rafraîchi récemment (par nous ou par un pair via sync).
+                account.last_refresh = Some(chrono::Utc::now());
             }
         }
         self.persist()
@@ -1267,6 +1270,24 @@ pub fn scan_local_credentials() -> Vec<ScannedCredential> {
         }
     }
 
+    // 5. ~/.gemini/oauth_creds.json (Gemini CLI)
+    if let Some(home) = dirs::home_dir() {
+        paths_to_scan.push(home.join(".gemini").join("oauth_creds.json"));
+        paths_to_scan.push(home.join(".config").join("gemini").join("oauth_creds.json"));
+    }
+    // 6. /mnt/c/Users/*/.gemini/oauth_creds.json (WSL → Windows)
+    if mnt_users.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(mnt_users) {
+            for entry in entries.flatten() {
+                let user_dir = entry.path();
+                if !user_dir.is_dir() {
+                    continue;
+                }
+                paths_to_scan.push(user_dir.join(".gemini").join("oauth_creds.json"));
+            }
+        }
+    }
+
     let mut all_creds: Vec<ScannedCredential> = Vec::new();
     let mut seen_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1274,7 +1295,12 @@ pub fn scan_local_credentials() -> Vec<ScannedCredential> {
         if !path.exists() {
             continue;
         }
-        let found = parse_credentials_file(path);
+        // Gemini CLI oauth_creds.json has a different format
+        let found = if path.file_name().and_then(|n| n.to_str()) == Some("oauth_creds.json") {
+            parse_gemini_cli_credentials_file(path)
+        } else {
+            parse_credentials_file(path)
+        };
         for cred in found {
             if seen_tokens.insert(cred.access_token.clone()) {
                 all_creds.push(cred);
@@ -1283,6 +1309,39 @@ pub fn scan_local_credentials() -> Vec<ScannedCredential> {
     }
 
     all_creds
+}
+
+/// Parse un fichier `oauth_creds.json` du Gemini CLI.
+/// Format: { "access_token": "...", "refresh_token": "...", "token_type": "Bearer", "expiry_date": <ms> }
+fn parse_gemini_cli_credentials_file(path: &std::path::Path) -> Vec<ScannedCredential> {
+    let source_path = path.to_string_lossy().to_string();
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    let obj: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let access_token = match obj["access_token"].as_str().filter(|s| !s.is_empty()) {
+        Some(t) => t.to_string(),
+        None => return vec![],
+    };
+    let refresh_token = obj["refresh_token"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&access_token)
+        .to_string();
+    let expires_at_ms = obj["expiry_date"].as_i64();
+    vec![ScannedCredential {
+        source_path,
+        email: None,
+        name: Some("Gemini CLI".to_string()),
+        access_token,
+        refresh_token,
+        expires_at_ms,
+        provider: Some("gemini".to_string()),
+    }]
 }
 
 #[cfg(test)]

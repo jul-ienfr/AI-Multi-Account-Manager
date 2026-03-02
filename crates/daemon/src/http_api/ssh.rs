@@ -61,6 +61,27 @@ pub async fn add_ssh_host(
 
     let _ = state.config.persist();
 
+    // Broadcast SshHostUpdate (add) to P2P peers
+    if let Some(bus) = &state.sync_bus {
+        let bus = bus.clone();
+        let instance_id = bus.instance_id().to_string();
+        let host_id = cfg.id.clone();
+        let host_json = serde_json::to_string(&cfg).ok();
+        tokio::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::SshHostUpdate {
+                    action: "add".into(),
+                    host_id,
+                    host_json,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
+
     ok_json(json!({"ok": true, "id": cfg.id}))
 }
 
@@ -75,6 +96,26 @@ pub async fn remove_ssh_host(
 ) -> impl IntoResponse {
     state.config.write().sync.ssh_hosts.retain(|h| h.id != id);
     let _ = state.config.persist();
+
+    // Broadcast SshHostUpdate (remove) to P2P peers
+    if let Some(bus) = &state.sync_bus {
+        let bus = bus.clone();
+        let instance_id = bus.instance_id().to_string();
+        let host_id = id.clone();
+        tokio::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::SshHostUpdate {
+                    action: "remove".into(),
+                    host_id,
+                    host_json: None,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
 
     ok_json(json!({"ok": true}))
 }

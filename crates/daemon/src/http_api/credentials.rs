@@ -76,6 +76,18 @@ pub async fn import_creds(
 
     let _ = state.credentials.persist();
 
+    if count > 0 {
+        if let Some(bus) = state.sync_bus.clone() {
+            let creds = Arc::clone(&state.credentials);
+            tokio::spawn(async move {
+                if let Ok(accounts_json) = creds.export_json() {
+                    let active_key = creds.active_key();
+                    let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+                }
+            });
+        }
+    }
+
     ok_json(ImportResult { imported: count })
 }
 
@@ -137,6 +149,16 @@ pub async fn capture_token(
         }
 
         let _ = state.credentials.persist();
+
+        if let Some(bus) = state.sync_bus.clone() {
+            let creds = Arc::clone(&state.credentials);
+            tokio::spawn(async move {
+                if let Ok(accounts_json) = creds.export_json() {
+                    let active_key = creds.active_key();
+                    let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+                }
+            });
+        }
     }
 
     ok_json(&result)

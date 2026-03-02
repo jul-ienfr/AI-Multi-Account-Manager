@@ -37,6 +37,8 @@ pub struct CredentialsWatchdog {
     /// Chemin optionnel du fichier `.credentials.json` de Claude Code CLI.
     /// Quand ce fichier change, la réconciliation est faite par email (3.4c).
     cc_credentials_path: Option<PathBuf>,
+    /// Bus de synchronisation P2P optionnel — broadcast après chaque reload réussi.
+    sync_bus: Option<Arc<ai_sync::bus::SyncBus>>,
 }
 
 impl CredentialsWatchdog {
@@ -46,7 +48,13 @@ impl CredentialsWatchdog {
             credentials,
             path,
             cc_credentials_path: None,
+            sync_bus: None,
         }
+    }
+
+    /// Configure le bus de synchronisation P2P pour broadcaster après chaque reload réussi.
+    pub fn set_sync_bus(&mut self, bus: Arc<ai_sync::bus::SyncBus>) {
+        self.sync_bus = Some(bus);
     }
 
     /// Crée un watchdog qui surveille aussi le `.credentials.json` de Claude Code CLI.
@@ -149,6 +157,15 @@ impl CredentialsWatchdog {
                                                     "CredentialsWatchdog: CC merge successful ({} account(s) updated)",
                                                     merged
                                                 );
+                                                if let Some(bus) = self.sync_bus.clone() {
+                                                    let creds = Arc::clone(&self.credentials);
+                                                    tokio::spawn(async move {
+                                                        if let Ok(accounts_json) = creds.export_json() {
+                                                            let active_key = creds.active_key();
+                                                            let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+                                                        }
+                                                    });
+                                                }
                                             }
                                             Err(e) => {
                                                 warn!("CredentialsWatchdog: CC merge failed: {}", e);
@@ -164,6 +181,15 @@ impl CredentialsWatchdog {
                                                 "CredentialsWatchdog: reload successful ({} accounts)",
                                                 self.credentials.account_count()
                                             );
+                                            if let Some(bus) = self.sync_bus.clone() {
+                                                let creds = Arc::clone(&self.credentials);
+                                                tokio::spawn(async move {
+                                                    if let Ok(accounts_json) = creds.export_json() {
+                                                        let active_key = creds.active_key();
+                                                        let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+                                                    }
+                                                });
+                                            }
                                         }
                                         Err(e) => {
                                             warn!("CredentialsWatchdog: reload failed: {}", e);

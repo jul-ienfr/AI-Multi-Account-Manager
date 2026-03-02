@@ -34,11 +34,23 @@ pub fn run() {
 
             // Spawn SyncBus si activé
             if let Some(bus) = app.state::<AppState>().sync_bus.read().clone() {
+                // Enregistre les credentials pour répondre aux SyncRequest entrants
+                bus.set_credentials(app.state::<AppState>().credentials.clone());
+
                 // 1. Démarrer l'écoute TCP entrante
                 let bus_for_start = bus.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(e) = bus_for_start.start().await {
-                        tracing::error!("SyncBus start error: {}", e);
+                    tracing::info!("[sync] Starting SyncBus listener...");
+                    let result = bus_for_start.start().await;
+                    let msg = match &result {
+                        Ok(()) => "OK: SyncBus listener started".to_string(),
+                        Err(e) => format!("FAIL: SyncBus start error: {}", e),
+                    };
+                    tracing::info!("[sync] {}", msg);
+                    // Diagnostic file (visible sans console)
+                    if let Some(data_dir) = dirs::data_dir() {
+                        let diag = data_dir.join("ai-manager").join("sync-diag.txt");
+                        let _ = std::fs::write(&diag, &msg);
                     }
                 });
 
@@ -102,6 +114,77 @@ pub fn run() {
                     }
                 });
                 tracing::info!("SyncCoordinator started");
+
+                // 5. Spawn P2P → Tauri event bridge
+                //    Écoute les messages sync entrants et émet des événements Tauri
+                //    pour que le frontend Svelte se rafraîchisse.
+                let bus_for_events = bus.clone();
+                let app_for_events = app.handle().clone();
+                let creds_for_events = app.state::<AppState>().credentials.clone();
+                let local_instance_id = bus.instance_id().to_string();
+                tauri::async_runtime::spawn(async move {
+                    use ai_sync::messages::SyncPayload;
+                    use tauri::Emitter;
+                    let mut rx = bus_for_events.subscribe();
+                    loop {
+                        match rx.recv().await {
+                            Ok(msg) => {
+                                // Ignorer nos propres messages
+                                if msg.from == local_instance_id { continue; }
+
+                                match &msg.payload {
+                                    SyncPayload::Credentials { .. } | SyncPayload::SyncResponse { .. } => {
+                                        tracing::debug!("[sync-event-bridge] Credentials from {} → sync_refresh", msg.from);
+                                        let _ = app_for_events.emit("sync_refresh", ());
+                                    }
+                                    SyncPayload::AccountSwitch { new_key, .. } => {
+                                        tracing::debug!("[sync-event-bridge] AccountSwitch → {}", new_key);
+                                        let _ = app_for_events.emit("account_switch", new_key);
+                                    }
+                                    SyncPayload::QuotaUpdate { account_key, tokens_5h, tokens_7d, .. } => {
+                                        let limit5h = creds_for_events.get_account(account_key)
+                                            .and_then(|a| a.quota_5h)
+                                            .unwrap_or(45_000_000);
+                                        let event = events::QuotaUpdateEvent {
+                                            key: account_key.clone(),
+                                            quota: events::QuotaUpdatePayload {
+                                                tokens5h: *tokens_5h,
+                                                limit5h: limit5h,
+                                                tokens7d: *tokens_7d,
+                                                limit7d: limit5h * 4,
+                                                phase: None,
+                                                ema_velocity: 0.0,
+                                                time_to_threshold: None,
+                                                last_updated: Some(chrono::Utc::now().to_rfc3339()),
+                                                resets_at_5h: None,
+                                                resets_at_7d: None,
+                                            },
+                                        };
+                                        let _ = app_for_events.emit("quota_update", &event);
+                                    }
+                                    SyncPayload::ConfigUpdate { .. }
+                                    | SyncPayload::InvalidGrantUpdate { .. }
+                                    | SyncPayload::ProfileUpdate { .. }
+                                    | SyncPayload::ProxyConfigUpdate { .. }
+                                    | SyncPayload::SshHostUpdate { .. }
+                                    | SyncPayload::PeerConfigUpdate { .. } => {
+                                        tracing::debug!("[sync-event-bridge] {} from {} → sync_refresh", msg.payload.variant_name(), msg.from);
+                                        let _ = app_for_events.emit("sync_refresh", ());
+                                    }
+                                    _ => {} // Heartbeat, Handshake, etc.
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                tracing::warn!("[sync-event-bridge] lagged {} messages", n);
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                tracing::info!("[sync-event-bridge] bus closed, stopping");
+                                break;
+                            }
+                        }
+                    }
+                });
+                tracing::info!("[sync-event-bridge] started");
             }
 
             // Ouvrir les devtools uniquement en mode debug
@@ -187,6 +270,8 @@ pub fn run() {
             get_stats,
             // Phase 3.4a — Capture token roté avant switch
             capture_before_switch,
+            // Gemini OAuth 2.0 PKCE
+            gemini_oauth_flow,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -279,6 +364,24 @@ async fn quota_refresh_loop(
                 continue;
             }
 
+            // Split quota fetch : si ce compte a été rafraîchi récemment par un pair
+            // (last_refresh mis à jour par handle_quota_update), on évite de re-fetch.
+            if config.read().sync.split_quota_fetch {
+                if let Some(lr) = account.last_refresh {
+                    let age_secs = chrono::Utc::now()
+                        .signed_duration_since(lr)
+                        .num_seconds();
+                    let threshold = interval_secs.saturating_sub(5) as i64;
+                    if age_secs < threshold {
+                        tracing::debug!(
+                            "Split quota fetch: skipping {} (refreshed {}s ago by peer)",
+                            key, age_secs
+                        );
+                        continue;
+                    }
+                }
+            }
+
             let oauth_data = match account.get_best_oauth() {
                 Some(o) => o.clone(),
                 None => continue,
@@ -319,6 +422,30 @@ async fn quota_refresh_loop(
                                 }
                                 access_token = new_oauth.access_token.clone();
                                 let _ = credentials.update_oauth(key, new_oauth);
+                                // Broadcast le nouveau token aux pairs P2P
+                                if let Some(bus) = app_handle.try_state::<AppState>()
+                                    .and_then(|s| s.sync_bus.read().clone())
+                                {
+                                    let instance_id = bus.instance_id().to_string();
+                                    let creds_clone = credentials.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        if let Ok(accounts_json) = creds_clone.export_json() {
+                                            let active_key = creds_clone.active_key();
+                                            let clock = bus.next_clock();
+                                            let msg = ai_sync::messages::SyncMessage::new(
+                                                &instance_id,
+                                                ai_sync::messages::SyncPayload::Credentials {
+                                                    accounts_json,
+                                                    active_key,
+                                                    clock,
+                                                },
+                                            );
+                                            if let Err(e) = bus.broadcast(msg).await {
+                                                tracing::debug!("Credentials broadcast after token refresh failed: {}", e);
+                                            }
+                                        }
+                                    });
+                                }
                                 // Retry quota fetch with new token
                                 oauth::fetch_quota(&client, &access_token).await.ok()
                             }
@@ -332,6 +459,19 @@ async fn quota_refresh_loop(
                                 webhook_sender.send(WebhookEvent::TokenRevoked {
                                     key: key.clone(),
                                 }).await;
+                                // Broadcast invalid_grant update to P2P peers
+                                if let Some(bus) = app_handle.try_state::<crate::state::AppState>().and_then(|s| s.sync_bus.read().clone()) {
+                                    let ig_snapshot: Vec<String> = invalid_grant_accounts.read().iter().cloned().collect();
+                                    tokio::spawn(async move {
+                                        let instance_id = bus.instance_id().to_string();
+                                        let clock = bus.next_clock();
+                                        let msg = ai_sync::messages::SyncMessage::new(
+                                            &instance_id,
+                                            ai_sync::messages::SyncPayload::InvalidGrantUpdate { invalid_keys: ig_snapshot, clock },
+                                        );
+                                        let _ = bus.broadcast(msg).await;
+                                    });
+                                }
                                 None
                             }
                             RefreshResult::Expired => {
@@ -439,6 +579,28 @@ async fn quota_refresh_loop(
 
                 // Update credentials cache
                 let _ = credentials.update_quota(key, tokens5h, tokens7d);
+
+                // Broadcast QuotaUpdate aux pairs P2P
+                if let Some(bus) = app_handle.try_state::<AppState>()
+                    .and_then(|s| s.sync_bus.read().clone())
+                {
+                    let instance_id = bus.instance_id().to_string();
+                    let msg = ai_sync::messages::SyncMessage::new(
+                        &instance_id,
+                        ai_sync::messages::SyncPayload::QuotaUpdate {
+                            account_key: key.clone(),
+                            tokens_5h: tokens5h,
+                            tokens_7d: tokens7d,
+                            clock: bus.next_clock(),
+                        },
+                    );
+                    let bus_clone = bus.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = bus_clone.broadcast(msg).await {
+                            tracing::debug!("QuotaUpdate broadcast failed: {}", e);
+                        }
+                    });
+                }
 
                 // Store full quota JSON
                 if let Ok(quota_json) = serde_json::to_value(&quota) {
@@ -549,6 +711,15 @@ async fn quota_refresh_loop(
                     to: decision.to_key.clone(),
                     reason: decision.reason.to_string(),
                 }).await;
+                // Broadcast AccountSwitch to P2P peers
+                if let Some(bus) = app_handle.try_state::<AppState>()
+                    .and_then(|s| s.sync_bus.read().clone())
+                {
+                    let key_clone = decision.to_key.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = bus.broadcast_account_switch(key_clone).await;
+                    });
+                }
             } else if let Some(rotation) = switch_ctrl.check_rotation(&credentials, &cfg) {
                 let from_key = credentials.active_key().unwrap_or_else(|| "none".to_string());
                 tracing::info!("Rotation: → {} ({})", rotation.to_key, rotation.reason);
@@ -572,6 +743,15 @@ async fn quota_refresh_loop(
                     to: rotation.to_key.clone(),
                     reason: rotation.reason.to_string(),
                 }).await;
+                // Broadcast AccountSwitch to P2P peers
+                if let Some(bus) = app_handle.try_state::<AppState>()
+                    .and_then(|s| s.sync_bus.read().clone())
+                {
+                    let key_clone = rotation.to_key.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = bus.broadcast_account_switch(key_clone).await;
+                    });
+                }
             }
         }
 

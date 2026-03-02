@@ -14,6 +14,9 @@ function createAccountsStore() {
       await api.switchAccount(key);
       update(accs => accs.map(a => ({ ...a, isActive: a.key === key })));
     },
+    setActive: (key: string) => {
+      update(accs => accs.map(a => ({ ...a, isActive: a.key === key })));
+    },
     updateQuota: (key: string, quota: QuotaInfo) => {
       update(accs => accs.map(a => a.key === key ? { ...a, quota } : a));
     },

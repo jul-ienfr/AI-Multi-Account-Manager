@@ -104,6 +104,30 @@ pub async fn add_peer(
         info!("P2P: initiated connection to peer {} @ {}:{}", id, host, port);
     }
 
+    // Broadcast PeerConfigUpdate to P2P peers
+    if let Some(bus) = &state.sync_bus {
+        let bus = bus.clone();
+        let instance_id = bus.instance_id().to_string();
+        let peer_id = id.clone();
+        let peer_host = host.clone();
+        let peer_port = port;
+        tokio::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::PeerConfigUpdate {
+                    action: "add".into(),
+                    peer_id: Some(peer_id),
+                    host: Some(peer_host),
+                    port: Some(peer_port),
+                    shared_key_hex: None,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
+
     ok_json(json!({"ok": true, "id": id}))
 }
 
@@ -122,6 +146,28 @@ pub async fn remove_peer(
 
     if let Some(bus) = &state.sync_bus {
         bus.remove_peer(&id);
+    }
+
+    // Broadcast PeerConfigUpdate (remove) to P2P peers
+    if let Some(bus) = &state.sync_bus {
+        let bus = bus.clone();
+        let instance_id = bus.instance_id().to_string();
+        let peer_id = id.clone();
+        tokio::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::PeerConfigUpdate {
+                    action: "remove".into(),
+                    peer_id: Some(peer_id),
+                    host: None,
+                    port: None,
+                    shared_key_hex: None,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
     }
 
     ok_json(json!({"ok": true}))
@@ -143,6 +189,28 @@ pub async fn gen_key(State(state): State<Arc<DaemonState>>) -> impl IntoResponse
     state.config.write().sync.shared_key_hex = Some(hex_key.clone());
     let _ = state.config.persist();
 
+    // Broadcast PeerConfigUpdate (set_key) to P2P peers
+    if let Some(bus) = &state.sync_bus {
+        let bus = bus.clone();
+        let instance_id = bus.instance_id().to_string();
+        let key_clone = hex_key.clone();
+        tokio::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::PeerConfigUpdate {
+                    action: "set_key".into(),
+                    peer_id: None,
+                    host: None,
+                    port: None,
+                    shared_key_hex: Some(key_clone),
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
+
     ok_json(json!({"key": hex_key}))
 }
 
@@ -161,6 +229,28 @@ pub async fn set_key(
 
     state.config.write().sync.shared_key_hex = Some(body.key.clone());
     let _ = state.config.persist();
+
+    // Broadcast PeerConfigUpdate (set_key) to P2P peers
+    if let Some(bus) = &state.sync_bus {
+        let bus = bus.clone();
+        let instance_id = bus.instance_id().to_string();
+        let key_clone = body.key.clone();
+        tokio::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::PeerConfigUpdate {
+                    action: "set_key".into(),
+                    peer_id: None,
+                    host: None,
+                    port: None,
+                    shared_key_hex: Some(key_clone),
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
 
     ok_json(json!({"ok": true}))
 }

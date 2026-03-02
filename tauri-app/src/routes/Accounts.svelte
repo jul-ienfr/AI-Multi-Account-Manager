@@ -3,10 +3,10 @@
   import AccountList from "../components/accounts/AccountList.svelte";
   import Button from "../components/ui/Button.svelte";
   import Dialog from "../components/ui/Dialog.svelte";
-  import { RefreshCw, Plus, Users, Upload, ScanSearch, Zap } from "lucide-svelte";
+  import { RefreshCw, Plus, Users, Upload, ChevronDown } from "lucide-svelte";
   import { onMount } from "svelte";
   import type { AccountState, ScannedCredential, CaptureResult } from "../lib/types";
-  import { scanLocalCredentials, importScannedCredentials, findClaudeBinary, captureOAuthToken } from "../lib/tauri";
+  import { scanLocalCredentials, importScannedCredentials, findClaudeBinary, captureOAuthToken, geminiOAuthFlow } from "../lib/tauri";
   import { toast } from "../lib/stores/toast";
 
   let accountList: AccountState[] = $state([]);
@@ -15,15 +15,37 @@
   let showImportDialog = $state(false);
   let importToken = $state("");
 
-  // Formulaire ajout compte
+  // Formulaire ajout compte (OAuth)
   let newKey = $state("");
   let newAccessToken = $state("");
+  let newRefreshToken = $state("");
   let newName = $state("");
   let newEmail = $state("");
   let newProvider = $state("anthropic");
   let newPriority = $state(1);
-  let newPlanType = $state("");
+  let newPlanType = $state("pro");
   let adding = $state(false);
+
+  // Formulaire ajout compte API
+  let showApiDialog = $state(false);
+  let apiKey = $state("");
+  let apiUrl = $state("");
+  let apiFormat = $state("anthropic");
+  let apiName = $state("");
+  let apiEmail = $state("");
+  let apiQuotaTokens = $state("");
+  let apiQuotaRequests = $state("");
+  let apiTierOpus = $state("");
+  let apiTierSonnet = $state("");
+  let apiTierHaiku = $state("");
+  let addingApi = $state(false);
+
+  // Gemini OAuth
+  let geminiOAuthLoading = $state(false);
+
+  // Dropdown menus
+  let showAddMenu = $state(false);
+  let showImportMenu = $state(false);
 
   // Auto-import
   let showAutoImportDialog = $state(false);
@@ -61,33 +83,92 @@
   function resetForm() {
     newKey = "";
     newAccessToken = "";
+    newRefreshToken = "";
     newName = "";
     newEmail = "";
     newProvider = "anthropic";
     newPriority = 1;
-    newPlanType = "";
+    newPlanType = "pro";
+  }
+
+  function resetApiForm() {
+    apiKey = "";
+    apiUrl = "";
+    apiFormat = "anthropic";
+    apiName = "";
+    apiEmail = "";
+    apiQuotaTokens = "";
+    apiQuotaRequests = "";
+    apiTierOpus = "";
+    apiTierSonnet = "";
+    apiTierHaiku = "";
   }
 
   async function handleAdd() {
     if (!newKey.trim() || !newAccessToken.trim()) return;
     adding = true;
     try {
+      const rt = newRefreshToken.trim() || newAccessToken.trim();
       await accounts.add(newKey.trim(), {
         name: newName.trim() || newKey.trim(),
         displayName: newName.trim() || newKey.trim(),
         email: newEmail.trim() || undefined,
         provider: newProvider as any,
         priority: newPriority,
-        planType: newPlanType.trim() || undefined,
+        planType: newPlanType || undefined,
         claudeAiOauth: {
           accessToken: newAccessToken.trim(),
-          refreshToken: newAccessToken.trim(),
+          refreshToken: rt,
         },
       });
       showAddDialog = false;
       resetForm();
     } finally {
       adding = false;
+    }
+  }
+
+  async function handleAddApi() {
+    if (!apiKey.trim()) return;
+    addingApi = true;
+    try {
+      const key = apiEmail.trim() || apiName.trim() || `api-${Date.now()}`;
+      const modelMappings: Record<string, string> = {};
+      if (apiTierOpus.trim()) modelMappings["opus"] = apiTierOpus.trim();
+      if (apiTierSonnet.trim()) modelMappings["sonnet"] = apiTierSonnet.trim();
+      if (apiTierHaiku.trim()) modelMappings["haiku"] = apiTierHaiku.trim();
+      await accounts.add(key, {
+        name: apiName.trim() || key,
+        email: apiEmail.trim() || undefined,
+        provider: apiFormat === "gemini" ? "gemini" : apiFormat === "anthropic" ? "anthropic" : "openai",
+        accountType: "api",
+        apiKey: apiKey.trim() as any,
+        apiUrl: apiUrl.trim() || undefined,
+        apiFormat: apiFormat,
+      } as any);
+      showApiDialog = false;
+      resetApiForm();
+      toast.success("Compte API ajouté", `${key} configuré avec succès.`);
+    } catch (e) {
+      toast.error("Erreur", String(e));
+    } finally {
+      addingApi = false;
+    }
+  }
+
+  async function handleGeminiOAuth() {
+    geminiOAuthLoading = true;
+    try {
+      const result = await geminiOAuthFlow();
+      await accounts.load();
+      toast.success(
+        "Compte Gemini ajouté",
+        result.email ? `Connecté en tant que ${result.email}` : "Compte ajouté avec succès."
+      );
+    } catch (e) {
+      toast.error("Erreur Gemini OAuth", String(e));
+    } finally {
+      geminiOAuthLoading = false;
     }
   }
 
@@ -109,20 +190,23 @@
     return `token-${c.accessToken?.slice(0, 8) ?? "???"}…`;
   }
 
-  async function handleOpenAutoImport() {
+  async function handleOpenAutoImport(filter: "all" | "claude" | "gemini" = "all") {
     scanning = true;
     scannedCredentials = [];
     selectedCredentials = new Set();
     showAutoImportDialog = true;
     try {
       const found = await scanLocalCredentials();
-      scannedCredentials = found;
-      if (found.length === 0) {
+      const filtered = filter === "all" ? found
+        : filter === "gemini" ? found.filter(c => c.provider === "gemini")
+        : found.filter(c => c.provider !== "gemini");
+      scannedCredentials = filtered;
+      if (filtered.length === 0) {
         showAutoImportDialog = false;
-        toast.info("Aucun token local trouvé", "Aucun fichier de credentials Claude n'a été détecté.");
+        const label = filter === "gemini" ? "Gemini" : filter === "claude" ? "Claude Code" : "tokens locaux";
+        toast.info("Aucun token trouvé", `Aucun credential ${label} détecté.`);
       } else {
-        // Tout pré-cocher
-        selectedCredentials = new Set(found.map(credKey));
+        selectedCredentials = new Set(filtered.map(credKey));
       }
     } catch (err) {
       showAutoImportDialog = false;
@@ -247,6 +331,8 @@
   let someSelected = $derived(selectedCredentials.size > 0 && selectedCredentials.size < scannedCredentials.length);
 </script>
 
+<svelte:window onclick={() => { showAddMenu = false; showImportMenu = false; }} />
+
 <div class="accounts-screen">
   <!-- Header -->
   <header class="screen-header">
@@ -266,22 +352,44 @@
         <span class:spin={loading} style="display:flex"><RefreshCw size={14} /></span>
         Rafraîchir
       </Button>
-      <Button variant="ghost" size="sm" onclick={handleOpenSetup}>
-        <Zap size={14} />
-        Setup auto
-      </Button>
-      <Button variant="ghost" size="sm" onclick={handleOpenAutoImport} disabled={scanning}>
-        <span class:spin={scanning} style="display:flex"><ScanSearch size={14} /></span>
-        Import auto
-      </Button>
-      <Button variant="ghost" size="sm" onclick={() => (showImportDialog = true)}>
-        <Upload size={14} />
-        Importer
-      </Button>
-      <Button variant="primary" size="sm" onclick={() => (showAddDialog = true)}>
-        <Plus size={14} />
-        Ajouter
-      </Button>
+
+      <!-- Ajouter dropdown -->
+      <div class="ddwrap">
+        <button class="ddbtn ddbtn-primary" onclick={(e) => { e.stopPropagation(); showAddMenu = !showAddMenu; showImportMenu = false; }}>
+          <Plus size={13} />
+          Ajouter
+          <ChevronDown size={11} />
+        </button>
+        {#if showAddMenu}
+          <div class="ddmenu" onclick={(e) => e.stopPropagation()}>
+            <button class="dditem" onclick={() => { showAddMenu = false; handleOpenAutoImport("claude"); }}>Token CLI uniquement</button>
+            <button class="dditem" onclick={() => { showAddMenu = false; handleOpenSetup(); }}>Setup Token uniquement</button>
+            <button class="dditem" onclick={() => { showAddMenu = false; handleOpenSetup(); }}>CLI + Setup Token</button>
+            <div class="ddsep"></div>
+            <button class="dditem" onclick={() => { showAddMenu = false; resetApiForm(); showApiDialog = true; }}>Clé API (endpoint custom)</button>
+            <div class="ddsep"></div>
+            <button class="dditem" onclick={() => { showAddMenu = false; handleGeminiOAuth(); }}>Compte Gemini (via Gemini CLI)</button>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Importer dropdown -->
+      <div class="ddwrap">
+        <button class="ddbtn" onclick={(e) => { e.stopPropagation(); showImportMenu = !showImportMenu; showAddMenu = false; }}>
+          <Upload size={13} />
+          Importer
+          <ChevronDown size={11} />
+        </button>
+        {#if showImportMenu}
+          <div class="ddmenu ddmenu-right" onclick={(e) => e.stopPropagation()}>
+            <button class="dditem" onclick={() => { showImportMenu = false; handleOpenAutoImport("all"); }}>Importer tous les tokens</button>
+            <button class="dditem" onclick={() => { showImportMenu = false; handleOpenAutoImport("claude"); }}>Importer Claude Code</button>
+            <button class="dditem" onclick={() => { showImportMenu = false; handleOpenAutoImport("gemini"); }}>Importer Gemini</button>
+            <div class="ddsep"></div>
+            <button class="dditem" onclick={() => { showImportMenu = false; showImportDialog = true; }}>Importer le plus récent</button>
+          </div>
+        {/if}
+      </div>
     </div>
   </header>
 
@@ -404,8 +512,24 @@
       </div>
 
       <div class="form-field">
+        <label class="form-label" for="add-refresh">Refresh Token <span style="color:var(--fg-dim);font-weight:400">(optionnel — identique au token si vide)</span></label>
+        <input
+          id="add-refresh"
+          type="password"
+          class="form-input"
+          placeholder="refresh_token (laisser vide = même que access token)"
+          bind:value={newRefreshToken}
+          autocomplete="new-password"
+        />
+      </div>
+
+      <div class="form-field">
         <label class="form-label" for="add-plan">Plan</label>
-        <input id="add-plan" type="text" class="form-input" placeholder="pro, team, free..." bind:value={newPlanType} />
+        <select id="add-plan" class="form-input form-select" bind:value={newPlanType}>
+          <option value="pro">Pro</option>
+          <option value="max_x5">Max x5</option>
+          <option value="max_x20">Max x20</option>
+        </select>
       </div>
     </div>
   {/snippet}
@@ -473,8 +597,92 @@
 
   .screen-actions {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
+  }
+
+  /* Dropdown buttons */
+  .ddwrap {
+    position: relative;
+  }
+
+  .ddbtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--fg-secondary);
+    font-size: 12px;
+    font-family: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+
+  .ddbtn:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--border-hover);
+    color: var(--fg-primary);
+  }
+
+  .ddbtn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  .ddbtn-primary:hover {
+    background: color-mix(in srgb, var(--accent) 85%, #000);
+    border-color: color-mix(in srgb, var(--accent) 85%, #000);
+    color: #fff;
+  }
+
+  .ddmenu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 200px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    z-index: 1000;
+    padding: 4px 0;
+  }
+
+  .dditem {
+    display: block;
+    width: 100%;
+    padding: 7px 14px;
+    background: none;
+    border: none;
+    color: var(--fg-secondary);
+    font-size: 12px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+    white-space: nowrap;
+  }
+
+  .dditem:hover {
+    background: var(--bg-card-hover);
+    color: var(--fg-primary);
+  }
+
+  .ddmenu-right {
+    left: auto;
+    right: 0;
+  }
+
+  .ddsep {
+    height: 1px;
+    background: var(--border);
+    margin: 3px 0;
   }
 
   /* Spin pour RefreshCw */
@@ -994,6 +1202,103 @@
       onclick={handleImportSelected}
     >
       {importing ? "Import…" : `Importer ${selectedCredentials.size > 0 ? selectedCredentials.size : ""} sélection${selectedCredentials.size > 1 ? "s" : ""}`}
+    </Button>
+  {/snippet}
+</Dialog>
+
+<!-- Dialog compte API -->
+<Dialog bind:open={showApiDialog} title="Ajouter un compte API" onclose={() => { showApiDialog = false; resetApiForm(); }}>
+  {#snippet children()}
+    <div class="add-form">
+      <p style="font-size:12px;color:var(--fg-secondary);line-height:1.5">
+        Configurez un compte avec une clé API (Anthropic, OpenAI, Gemini, etc.).
+      </p>
+
+      <div class="form-field">
+        <label class="form-label" for="api-format">Format API</label>
+        <select id="api-format" class="form-input form-select" bind:value={apiFormat}>
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI (compatible)</option>
+          <option value="gemini">Gemini</option>
+        </select>
+      </div>
+
+      <div class="form-field">
+        <label class="form-label" for="api-key">Clé API <span class="req">*</span></label>
+        <input
+          id="api-key"
+          type="password"
+          class="form-input"
+          placeholder="sk-ant-... / sk-... / AIza..."
+          bind:value={apiKey}
+          autocomplete="new-password"
+        />
+      </div>
+
+      <div class="form-field">
+        <label class="form-label" for="api-url">URL API <span style="color:var(--fg-dim);font-weight:400">(optionnel)</span></label>
+        <input
+          id="api-url"
+          type="text"
+          class="form-input"
+          placeholder="https://api.anthropic.com (défaut si vide)"
+          bind:value={apiUrl}
+        />
+      </div>
+
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label" for="api-name">Nom</label>
+          <input id="api-name" type="text" class="form-input" placeholder="Mon compte API" bind:value={apiName} />
+        </div>
+        <div class="form-field">
+          <label class="form-label" for="api-email">Email</label>
+          <input id="api-email" type="email" class="form-input" placeholder="api@example.com" bind:value={apiEmail} />
+        </div>
+      </div>
+
+      <div style="font-size:11px;font-weight:600;color:var(--fg-dim);text-transform:uppercase;letter-spacing:0.5px;margin-top:4px">
+        Mapping de modèles (optionnel)
+      </div>
+      <div class="form-row" style="grid-template-columns:repeat(3,1fr)">
+        <div class="form-field">
+          <label class="form-label" for="api-opus">Opus →</label>
+          <input id="api-opus" type="text" class="form-input" placeholder="claude-opus-4-5" bind:value={apiTierOpus} />
+        </div>
+        <div class="form-field">
+          <label class="form-label" for="api-sonnet">Sonnet →</label>
+          <input id="api-sonnet" type="text" class="form-input" placeholder="claude-sonnet-4-5" bind:value={apiTierSonnet} />
+        </div>
+        <div class="form-field">
+          <label class="form-label" for="api-haiku">Haiku →</label>
+          <input id="api-haiku" type="text" class="form-input" placeholder="claude-haiku-4-5" bind:value={apiTierHaiku} />
+        </div>
+      </div>
+
+      <div style="font-size:11px;font-weight:600;color:var(--fg-dim);text-transform:uppercase;letter-spacing:0.5px;margin-top:4px">
+        Quotas (optionnel)
+      </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label" for="api-tokens">Tokens/jour</label>
+          <input id="api-tokens" type="number" class="form-input" placeholder="ex: 1000000" bind:value={apiQuotaTokens} min="0" />
+        </div>
+        <div class="form-field">
+          <label class="form-label" for="api-requests">Requêtes/jour</label>
+          <input id="api-requests" type="number" class="form-input" placeholder="ex: 1000" bind:value={apiQuotaRequests} min="0" />
+        </div>
+      </div>
+    </div>
+  {/snippet}
+  {#snippet actions()}
+    <Button variant="ghost" size="sm" onclick={() => { showApiDialog = false; resetApiForm(); }}>Annuler</Button>
+    <Button
+      variant="primary"
+      size="sm"
+      onclick={handleAddApi}
+      disabled={addingApi || !apiKey.trim()}
+    >
+      {addingApi ? "Ajout..." : "Ajouter"}
     </Button>
   {/snippet}
 </Dialog>

@@ -357,6 +357,19 @@ pub async fn switch_account(key: String, state: State<'_, AppState>) -> Result<(
                 ai_manager_core::oauth::RefreshResult::InvalidGrant => {
                     // Token révoqué — marquer dans invalid_grant_accounts
                     state.invalid_grant_accounts.write().insert(key.clone());
+                    // Broadcast invalid_grant update to P2P peers
+                    if let Some(bus) = state.sync_bus.read().clone() {
+                        let ig_snapshot: Vec<String> = state.invalid_grant_accounts.read().iter().cloned().collect();
+                        tauri::async_runtime::spawn(async move {
+                            let instance_id = bus.instance_id().to_string();
+                            let clock = bus.next_clock();
+                            let msg = ai_sync::messages::SyncMessage::new(
+                                &instance_id,
+                                ai_sync::messages::SyncPayload::InvalidGrantUpdate { invalid_keys: ig_snapshot, clock },
+                            );
+                            let _ = bus.broadcast(msg).await;
+                        });
+                    }
                     return Err(
                         "Token invalide ou expiré pour ce compte — réauthentification requise"
                             .to_string(),
@@ -420,6 +433,25 @@ pub async fn switch_account(key: String, state: State<'_, AppState>) -> Result<(
         .map_err(|e| e.to_string())?;
     info!("Switched to account: {}", key);
 
+    // Broadcast AccountSwitch aux pairs P2P
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let key_clone = key.clone();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::AccountSwitch {
+                    new_key: key_clone,
+                    clock,
+                },
+            );
+            if let Err(e) = bus.broadcast(msg).await {
+                tracing::debug!("AccountSwitch broadcast failed: {}", e);
+            }
+        });
+    }
+
     // Record switch in history
     let history_path = state.credentials_path.parent()
         .map(|p| p.join("switch_history.jsonl"))
@@ -463,12 +495,50 @@ pub async fn refresh_account(key: String, state: State<'_, AppState>) -> Result<
                 .update_oauth(&key, new_oauth)
                 .map_err(|e| e.to_string())?;
             // Refresh réussi → retirer du HashSet invalid_grant si présent
-            state.invalid_grant_accounts.write().remove(&key);
+            let was_invalid = state.invalid_grant_accounts.write().remove(&key);
             info!("Token refreshed for account {}", key);
+            // Broadcast invalid_grant update si le statut a changé
+            if was_invalid {
+                if let Some(bus) = state.sync_bus.read().clone() {
+                    let ig_snapshot: Vec<String> = state.invalid_grant_accounts.read().iter().cloned().collect();
+                    tauri::async_runtime::spawn(async move {
+                        let instance_id = bus.instance_id().to_string();
+                        let clock = bus.next_clock();
+                        let msg = ai_sync::messages::SyncMessage::new(
+                            &instance_id,
+                            ai_sync::messages::SyncPayload::InvalidGrantUpdate { invalid_keys: ig_snapshot, clock },
+                        );
+                        let _ = bus.broadcast(msg).await;
+                    });
+                }
+            }
+            // Broadcast credentials update to P2P peers
+            if let Some(bus) = state.sync_bus.read().clone() {
+                let creds = Arc::clone(&state.credentials);
+                tauri::async_runtime::spawn(async move {
+                    if let Ok(accounts_json) = creds.export_json() {
+                        let active_key = creds.active_key();
+                        let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+                    }
+                });
+            }
             Ok(())
         }
         ai_manager_core::oauth::RefreshResult::InvalidGrant => {
             state.invalid_grant_accounts.write().insert(key.clone());
+            // Broadcast invalid_grant update to P2P peers
+            if let Some(bus) = state.sync_bus.read().clone() {
+                let ig_snapshot: Vec<String> = state.invalid_grant_accounts.read().iter().cloned().collect();
+                tauri::async_runtime::spawn(async move {
+                    let instance_id = bus.instance_id().to_string();
+                    let clock = bus.next_clock();
+                    let msg = ai_sync::messages::SyncMessage::new(
+                        &instance_id,
+                        ai_sync::messages::SyncPayload::InvalidGrantUpdate { invalid_keys: ig_snapshot, clock },
+                    );
+                    let _ = bus.broadcast(msg).await;
+                });
+            }
             Err("Token refresh failed: invalid_grant — réauthentification requise".to_string())
         }
         ai_manager_core::oauth::RefreshResult::Expired => {
@@ -560,6 +630,16 @@ pub async fn add_account(
         .map_err(|e| e.to_string())?;
 
     info!("Account added: {}", key);
+    // Broadcast credentials update to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let creds = Arc::clone(&state.credentials);
+        tauri::async_runtime::spawn(async move {
+            if let Ok(accounts_json) = creds.export_json() {
+                let active_key = creds.active_key();
+                let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+            }
+        });
+    }
     Ok(())
 }
 
@@ -581,6 +661,16 @@ pub async fn delete_account(key: String, state: State<'_, AppState>) -> Result<(
         .persist()
         .map_err(|e| e.to_string())?;
     info!("Account deleted: {}", key);
+    // Broadcast credentials update to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let creds = Arc::clone(&state.credentials);
+        tauri::async_runtime::spawn(async move {
+            if let Ok(accounts_json) = creds.export_json() {
+                let active_key = creds.active_key();
+                let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+            }
+        });
+    }
     Ok(())
 }
 
@@ -639,6 +729,16 @@ pub async fn revoke_account(key: String, state: State<'_, AppState>) -> Result<(
         .map_err(|e| format!("Erreur de persistance après révocation : {}", e))?;
 
     info!("Account {} revoked and soft-deleted", key);
+    // Broadcast credentials update to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let creds = Arc::clone(&state.credentials);
+        tauri::async_runtime::spawn(async move {
+            if let Ok(accounts_json) = creds.export_json() {
+                let active_key = creds.active_key();
+                let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+            }
+        });
+    }
     Ok(())
 }
 
@@ -648,6 +748,8 @@ pub struct UpdateAccountData {
     pub priority: Option<u32>,
     pub auto_switch_disabled: Option<bool>,
     pub display_name: Option<String>,
+    pub plan_type: Option<String>,
+    pub gemini_project: Option<String>,
 }
 
 #[tauri::command]
@@ -671,12 +773,28 @@ pub async fn update_account(
         if let Some(n) = updates.display_name {
             account.display_name = Some(n);
         }
+        if let Some(pt) = updates.plan_type {
+            account.plan_type = if pt.is_empty() { None } else { Some(pt) };
+        }
+        if let Some(gp) = updates.gemini_project {
+            account.gemini_project = if gp.is_empty() { None } else { Some(gp) };
+        }
     }
     state
         .credentials
         .persist()
         .map_err(|e| e.to_string())?;
     info!("Account updated: {}", key);
+    // Broadcast credentials update to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let creds = Arc::clone(&state.credentials);
+        tauri::async_runtime::spawn(async move {
+            if let Ok(accounts_json) = creds.export_json() {
+                let active_key = creds.active_key();
+                let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+            }
+        });
+    }
     Ok(())
 }
 
@@ -704,6 +822,20 @@ pub async fn set_config(
         *state.config.write() = new_config;
     }
     state.config.persist().map_err(|e| e.to_string())?;
+    // Broadcast ConfigUpdate to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        if let Ok(config_json) = serde_json::to_string(&*state.config.read()) {
+            let instance_id = bus.instance_id().to_string();
+            tauri::async_runtime::spawn(async move {
+                let clock = bus.next_clock();
+                let msg = ai_sync::messages::SyncMessage::new(
+                    &instance_id,
+                    ai_sync::messages::SyncPayload::ConfigUpdate { config_json, clock },
+                );
+                let _ = bus.broadcast(msg).await;
+            });
+        }
+    }
     Ok(())
 }
 
@@ -911,6 +1043,33 @@ pub async fn add_peer(
         }
     }
     info!("Peer added: {}", peer_id);
+    // Broadcast PeerConfigUpdate to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let peer_id_clone = peer_id.clone();
+        let (h2, p2) = {
+            let cfg = state.config.read();
+            cfg.sync.peers.iter()
+                .find(|p| p.id == peer_id_clone)
+                .map(|p| (p.host.clone(), p.port))
+                .unwrap_or_default()
+        };
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::PeerConfigUpdate {
+                    action: "add".into(),
+                    peer_id: Some(peer_id_clone),
+                    host: Some(h2),
+                    port: Some(p2),
+                    shared_key_hex: None,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
@@ -933,6 +1092,26 @@ pub async fn remove_peer(
         bus.remove_peer(&id);
     }
     info!("Peer removed: {}", id);
+    // Broadcast PeerConfigUpdate to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let id_clone = id.clone();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::PeerConfigUpdate {
+                    action: "remove".into(),
+                    peer_id: Some(id_clone),
+                    host: None,
+                    port: None,
+                    shared_key_hex: None,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
@@ -1063,6 +1242,26 @@ pub async fn generate_sync_key(
     }
     let _ = state.config.persist();
     info!("New sync key generated");
+    // Broadcast PeerConfigUpdate (set_key) to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let hex_key_clone = hex_key.clone();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::PeerConfigUpdate {
+                    action: "set_key".into(),
+                    peer_id: None,
+                    host: None,
+                    port: None,
+                    shared_key_hex: Some(hex_key_clone),
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(hex_key)
 }
 
@@ -1086,10 +1285,30 @@ pub async fn set_sync_key(
     }
     {
         let mut cfg = state.config.write();
-        cfg.sync.shared_key_hex = Some(key);
+        cfg.sync.shared_key_hex = Some(key.clone());
     }
     let _ = state.config.persist();
     info!("Sync key updated");
+    // Broadcast PeerConfigUpdate (set_key) to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let key_clone = key.clone();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::PeerConfigUpdate {
+                    action: "set_key".into(),
+                    peer_id: None,
+                    host: None,
+                    port: None,
+                    shared_key_hex: Some(key_clone),
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
@@ -1147,6 +1366,30 @@ pub async fn add_ssh_host(
     }
     let _ = state.config.persist();
     info!("SSH host added: {}", id);
+    // Broadcast SshHostUpdate to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let id_clone = id.clone();
+        let host_json = {
+            let cfg = state.config.read();
+            cfg.sync.ssh_hosts.iter()
+                .find(|h| h.id == id_clone)
+                .and_then(|h| serde_json::to_string(h).ok())
+        };
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::SshHostUpdate {
+                    action: "add".into(),
+                    host_id: id_clone,
+                    host_json,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
@@ -1161,6 +1404,24 @@ pub async fn remove_ssh_host(
     }
     let _ = state.config.persist();
     info!("SSH host removed: {}", id);
+    // Broadcast SshHostUpdate (remove) to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let id_clone = id.clone();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::SshHostUpdate {
+                    action: "remove".into(),
+                    host_id: id_clone,
+                    host_json: None,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
@@ -1518,6 +1779,25 @@ pub async fn add_proxy_instance(
     }
 
     info!("Proxy instance added: {} ({})", config.name, config.id);
+    // Broadcast ProxyConfigUpdate to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let proxy_id = config.id.clone();
+        let config_json = serde_json::to_string(&config).unwrap_or_default();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::ProxyConfigUpdate {
+                    action: "add".into(),
+                    instance_id: proxy_id,
+                    config_json: Some(config_json),
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
@@ -1557,6 +1837,31 @@ pub async fn update_proxy_instance(
     }
     state.config.persist().map_err(|e| e.to_string())?;
     info!("Proxy instance updated: {}", id);
+    // Broadcast ProxyConfigUpdate to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let proxy_id = id.clone();
+        let updated_config_json = {
+            let cfg = state.config.read();
+            cfg.proxy.instances.iter()
+                .find(|i| i.id == proxy_id)
+                .and_then(|i| serde_json::to_string(i).ok())
+                .unwrap_or_default()
+        };
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::ProxyConfigUpdate {
+                    action: "update".into(),
+                    instance_id: proxy_id,
+                    config_json: Some(updated_config_json),
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
@@ -1588,6 +1893,24 @@ pub async fn delete_proxy_instance(
     }
     state.config.persist().map_err(|e| e.to_string())?;
     info!("Proxy instance deleted: {}", id);
+    // Broadcast ProxyConfigUpdate (delete) to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let proxy_id = id.clone();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::ProxyConfigUpdate {
+                    action: "delete".into(),
+                    instance_id: proxy_id,
+                    config_json: None,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
@@ -1834,11 +2157,19 @@ pub async fn detect_proxy_binaries() -> Result<Vec<DetectedBinary>, String> {
     }
 
     // anthrouter: check multiple build output paths
+    // Noms possibles du binaire : claude-router-auto, anthroute (sans 'r'), anthrouter
     let anthrouter_paths = [
+        "anthrouter/target/x86_64-pc-windows-gnu/release/claude-router-auto.exe",
+        "anthrouter/target/x86_64-pc-windows-gnu/release/anthroute.exe",
         "anthrouter/target/x86_64-pc-windows-gnu/release/anthrouter.exe",
-        "anthrouter/target/release/anthrouter.exe",
+        "anthrouter/target/release/claude-router-auto",
+        "anthrouter/target/release/anthroute",
         "anthrouter/target/release/anthrouter",
+        "anthrouter/claude-router-auto.exe",
+        "anthrouter/anthroute.exe",
         "anthrouter/anthrouter.exe",
+        "anthrouter/claude-router-auto",
+        "anthrouter/anthroute",
         "anthrouter/anthrouter",
     ];
     for rel in &anthrouter_paths {
@@ -1890,7 +2221,7 @@ pub async fn detect_proxy_binaries() -> Result<Vec<DetectedBinary>, String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn setup_claude_code(port: u16) -> Result<(), String> {
+pub async fn setup_claude_code(port: u16, state: State<'_, AppState>) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("Cannot find home directory")?;
     let settings_path = home.join(".claude").join("settings.json");
 
@@ -1914,11 +2245,30 @@ pub async fn setup_claude_code(port: u16) -> Result<(), String> {
     }
     std::fs::write(&settings_path, json).map_err(|e| e.to_string())?;
     info!("Claude Code setup: ANTHROPIC_BASE_URL={}", url);
+    // Broadcast IntegrationSetup to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let machine_id = instance_id.clone();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::IntegrationSetup {
+                    kind: "claude_code".into(),
+                    action: "setup".into(),
+                    port: Some(port),
+                    target_machine_id: machine_id,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn remove_claude_code_setup() -> Result<(), String> {
+pub async fn remove_claude_code_setup(state: State<'_, AppState>) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("Cannot find home directory")?;
     let settings_path = home.join(".claude").join("settings.json");
 
@@ -1936,11 +2286,30 @@ pub async fn remove_claude_code_setup() -> Result<(), String> {
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(&settings_path, json).map_err(|e| e.to_string())?;
     info!("Claude Code setup removed");
+    // Broadcast IntegrationSetup (remove) to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let machine_id = instance_id.clone();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::IntegrationSetup {
+                    kind: "claude_code".into(),
+                    action: "remove".into(),
+                    port: None,
+                    target_machine_id: machine_id,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn setup_vscode_proxy(port: u16) -> Result<(), String> {
+pub async fn setup_vscode_proxy(port: u16, state: State<'_, AppState>) -> Result<(), String> {
     let settings_path = find_vscode_settings()?;
 
     let mut settings: serde_json::Value = if settings_path.exists() {
@@ -1960,11 +2329,30 @@ pub async fn setup_vscode_proxy(port: u16) -> Result<(), String> {
     }
     std::fs::write(&settings_path, json).map_err(|e| e.to_string())?;
     info!("VS Code proxy setup: http.proxy={}", url);
+    // Broadcast IntegrationSetup to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let machine_id = instance_id.clone();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::IntegrationSetup {
+                    kind: "vscode".into(),
+                    action: "setup".into(),
+                    port: Some(port),
+                    target_machine_id: machine_id,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn remove_vscode_proxy() -> Result<(), String> {
+pub async fn remove_vscode_proxy(state: State<'_, AppState>) -> Result<(), String> {
     let settings_path = find_vscode_settings()?;
 
     if !settings_path.exists() {
@@ -1981,6 +2369,25 @@ pub async fn remove_vscode_proxy() -> Result<(), String> {
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(&settings_path, json).map_err(|e| e.to_string())?;
     info!("VS Code proxy removed");
+    // Broadcast IntegrationSetup (remove) to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let machine_id = instance_id.clone();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::IntegrationSetup {
+                    kind: "vscode".into(),
+                    action: "remove".into(),
+                    port: None,
+                    target_machine_id: machine_id,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
     Ok(())
 }
 
@@ -2051,6 +2458,18 @@ pub async fn import_scanned_credentials(
         }
     }
     let _ = state.credentials.persist();
+    if imported > 0 {
+        // Broadcast credentials update to P2P peers
+        if let Some(bus) = state.sync_bus.read().clone() {
+            let creds = Arc::clone(&state.credentials);
+            tauri::async_runtime::spawn(async move {
+                if let Ok(accounts_json) = creds.export_json() {
+                    let active_key = creds.active_key();
+                    let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+                }
+            });
+        }
+    }
     Ok(imported)
 }
 
@@ -2092,10 +2511,33 @@ pub async fn list_profiles() -> Result<Vec<ProfileInfoDto>, String> {
 
 /// Sauvegarde un profil de configuration.
 #[tauri::command]
-pub async fn save_profile(name: String, config: serde_json::Value) -> Result<(), String> {
+pub async fn save_profile(
+    name: String,
+    config: serde_json::Value,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     use ai_manager_core::profiles::ProfileManager;
     let mgr = ProfileManager::new(&profiles_dir());
-    mgr.save(&name, &config).map_err(|e| e.to_string())
+    mgr.save(&name, &config).map_err(|e| e.to_string())?;
+    // Broadcast ProfileUpdate to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let name_clone = name.clone();
+        let config_json = serde_json::to_string(&config).unwrap_or_default();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::ProfileUpdate {
+                    name: name_clone,
+                    config_json: Some(config_json),
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
+    Ok(())
 }
 
 /// Charge un profil de configuration.
@@ -2108,10 +2550,31 @@ pub async fn load_profile(name: String) -> Result<serde_json::Value, String> {
 
 /// Supprime un profil de configuration.
 #[tauri::command]
-pub async fn delete_profile(name: String) -> Result<(), String> {
+pub async fn delete_profile(
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     use ai_manager_core::profiles::ProfileManager;
     let mgr = ProfileManager::new(&profiles_dir());
-    mgr.delete(&name).map_err(|e| e.to_string())
+    mgr.delete(&name).map_err(|e| e.to_string())?;
+    // Broadcast ProfileUpdate (delete) to P2P peers
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let instance_id = bus.instance_id().to_string();
+        let name_clone = name.clone();
+        tauri::async_runtime::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::ProfileUpdate {
+                    name: name_clone,
+                    config_json: None,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2418,6 +2881,16 @@ pub async fn capture_oauth_token(
                 }
             }
             let _ = state.credentials.persist();
+            // Broadcast credentials update to P2P peers
+            if let Some(bus) = state.sync_bus.read().clone() {
+                let creds = Arc::clone(&state.credentials);
+                tauri::async_runtime::spawn(async move {
+                    if let Ok(accounts_json) = creds.export_json() {
+                        let active_key = creds.active_key();
+                        let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+                    }
+                });
+            }
         }
     }
 
@@ -2482,8 +2955,332 @@ pub async fn capture_before_switch(
     outgoing_key: String,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    state
+    let rotated = state
         .credentials
         .capture_rotated_tokens_before_switch(&outgoing_key)
-        .map_err(|e| format!("capture_before_switch failed for '{}': {}", outgoing_key, e))
+        .map_err(|e| format!("capture_before_switch failed for '{}': {}", outgoing_key, e))?;
+    if rotated {
+        // Broadcast credentials update to P2P peers (rotation detected)
+        if let Some(bus) = state.sync_bus.read().clone() {
+            let creds = Arc::clone(&state.credentials);
+            tauri::async_runtime::spawn(async move {
+                if let Ok(accounts_json) = creds.export_json() {
+                    let active_key = creds.active_key();
+                    let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+                }
+            });
+        }
+    }
+    Ok(rotated)
+}
+
+// ---------------------------------------------------------------------------
+// Gemini OAuth 2.0 PKCE flow
+// (port de V2 action_add_gemini_oauth — credentials publiques Gemini CLI, Apache 2.0)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiOAuthResult {
+    pub email: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at_ms: Option<i64>,
+    pub account_key: String,
+}
+
+/// Authentifie un compte Google via OAuth 2.0 PKCE et l'ajoute aux credentials.
+///
+/// Ouvre le navigateur, attend le callback sur un port local, échange le code,
+/// récupère l'email via userinfo, puis enregistre le compte (provider=gemini).
+#[tauri::command]
+pub async fn gemini_oauth_flow(state: State<'_, AppState>) -> Result<GeminiOAuthResult, String> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    // --- PKCE ---
+    let mut verifier_bytes = uuid::Uuid::new_v4().as_bytes().to_vec();
+    verifier_bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let code_verifier = base64url_no_pad(&verifier_bytes);
+    let challenge_hash = Sha256::digest(code_verifier.as_bytes());
+    let code_challenge = base64url_no_pad(&challenge_hash);
+    let oauth_state = uuid::Uuid::new_v4().simple().to_string();
+
+    // --- Port local ---
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("Impossible de démarrer le serveur OAuth local: {}", e))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let redirect_uri = format!("http://127.0.0.1:{}/oauth2callback", port);
+
+    // Credentials Google OAuth lus depuis la config (Paramètres > Gemini OAuth)
+    let (client_id, client_secret) = {
+        let cfg = state.config.read();
+        let id = cfg.gemini_oauth.client_id.clone();
+        let secret = cfg.gemini_oauth.client_secret.clone();
+        (id, secret)
+    };
+    if client_id.is_empty() || client_secret.is_empty() {
+        return Err("Credentials Google OAuth non configurés. Ajoutez-les dans Paramètres > Gemini OAuth.".to_string());
+    }
+    let CLIENT_ID: &str = &client_id;
+    let CLIENT_SECRET: &str = &client_secret;
+    const SCOPES: &str =
+        "openid email profile https://www.googleapis.com/auth/cloud-platform";
+
+    let auth_url = format!(
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
+        url_encode(CLIENT_ID),
+        url_encode(&redirect_uri),
+        url_encode(SCOPES),
+        oauth_state,
+        code_challenge,
+    );
+
+    // Ouvrir le navigateur
+    oauth_open_browser(&auth_url);
+
+    // Attendre le callback (3 minutes max)
+    let (auth_code, returned_state) = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        async {
+            let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).await.map_err(|e| e.to_string())?;
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let first_line = request.lines().next().unwrap_or("");
+            let path = first_line.split_whitespace().nth(1).unwrap_or("");
+            let query = path.split('?').nth(1).unwrap_or("");
+
+            let mut code = String::new();
+            let mut state_val = String::new();
+            let mut error = String::new();
+            for param in query.split('&') {
+                if let Some((k, v)) = param.split_once('=') {
+                    match k {
+                        "code" => code = v.to_string(),
+                        "state" => state_val = v.to_string(),
+                        "error" => error = v.to_string(),
+                        _ => {}
+                    }
+                }
+            }
+
+            let html = if !code.is_empty() {
+                "<html><body style='font-family:sans-serif;text-align:center;padding:60px'><h2>Authentification réussie</h2><p>Vous pouvez fermer cet onglet.</p></body></html>"
+            } else {
+                "<html><body style='font-family:sans-serif;text-align:center;padding:60px'><h2>Erreur</h2><p>Authentification échouée.</p></body></html>"
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                html.len(),
+                html
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+
+            if !error.is_empty() {
+                return Err(format!("Erreur Google OAuth: {}", error));
+            }
+            if code.is_empty() {
+                return Err("Aucun code d'autorisation reçu".to_string());
+            }
+            Ok::<(String, String), String>((code, state_val))
+        },
+    )
+    .await
+    .map_err(|_| "Timeout : 3 minutes sans réponse du navigateur".to_string())?
+    .map_err(|e| e)?;
+
+    if returned_state != oauth_state {
+        return Err("State OAuth invalide (protection CSRF)".to_string());
+    }
+
+    // Échange code → tokens
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let token_resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("client_id", CLIENT_ID),
+            ("client_secret", CLIENT_SECRET),
+            ("code", &auth_code),
+            ("redirect_uri", &redirect_uri),
+            ("grant_type", "authorization_code"),
+            ("code_verifier", &code_verifier),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Échange de token échoué : {}", e))?;
+
+    if !token_resp.status().is_success() {
+        let status = token_resp.status();
+        let body = token_resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Échange de token échoué ({}) : {}",
+            status,
+            &body[..200.min(body.len())]
+        ));
+    }
+
+    let tokens: serde_json::Value = token_resp
+        .json()
+        .await
+        .map_err(|e| format!("Impossible de lire la réponse token : {}", e))?;
+
+    let access_token = tokens["access_token"].as_str().unwrap_or("").to_string();
+    let refresh_token = tokens["refresh_token"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&access_token)
+        .to_string();
+    let expires_in = tokens["expires_in"].as_i64().unwrap_or(3600);
+    let expires_at_ms = chrono::Utc::now().timestamp_millis() + expires_in * 1000;
+
+    // Récupérer l'email
+    let email = {
+        let ui_resp = client
+            .get("https://www.googleapis.com/oauth2/v3/userinfo")
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .await;
+        if let Ok(resp) = ui_resp {
+            if resp.status().is_success() {
+                let ui: serde_json::Value = resp.json().await.unwrap_or_default();
+                ui["email"].as_str().unwrap_or("").to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        }
+    };
+
+    // Ajouter le compte
+    let account_key = if !email.is_empty() {
+        email.clone()
+    } else {
+        format!("gemini-{}", uuid::Uuid::new_v4().simple())
+    };
+
+    let oauth_data = OAuthData {
+        access_token: access_token.clone(),
+        refresh_token: refresh_token.clone(),
+        expires_at: chrono::DateTime::from_timestamp_millis(expires_at_ms),
+        token_type: Some("Bearer".to_string()),
+        scope: Some(SCOPES.to_string()),
+        scopes: None,
+        refresh_token_expires_at: None,
+        organization_uuid: None,
+    };
+
+    let account = AccountData {
+        name: if !email.is_empty() { Some(email.clone()) } else { None },
+        email: if !email.is_empty() { Some(email.clone()) } else { None },
+        provider: Some("gemini".to_string()),
+        priority: Some(1),
+        gemini_cli_oauth: Some(oauth_data.clone()),
+        oauth: Some(oauth_data),
+        added_at: Some(chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+        ..Default::default()
+    };
+
+    {
+        let mut creds = state.credentials.write();
+        creds.accounts.insert(account_key.clone(), account);
+    }
+    state.credentials.persist().map_err(|e| e.to_string())?;
+    info!("Gemini OAuth account added: {}", account_key);
+
+    // Broadcast credentials update
+    if let Some(bus) = state.sync_bus.read().clone() {
+        let creds = Arc::clone(&state.credentials);
+        tauri::async_runtime::spawn(async move {
+            if let Ok(accounts_json) = creds.export_json() {
+                let active_key = creds.active_key();
+                let _ = bus.broadcast_credentials_update(accounts_json, active_key).await;
+            }
+        });
+    }
+
+    Ok(GeminiOAuthResult {
+        email,
+        access_token,
+        refresh_token,
+        expires_at_ms: Some(expires_at_ms),
+        account_key,
+    })
+}
+
+/// Base64url encoding sans padding (RFC 4648 §5).
+fn base64url_no_pad(bytes: &[u8]) -> String {
+    const CHARS: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len() * 4 / 3 + 4);
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let n = ((bytes[i] as u32) << 16)
+            | ((bytes[i + 1] as u32) << 8)
+            | (bytes[i + 2] as u32);
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        out.push(CHARS[((n >> 6) & 63) as usize] as char);
+        out.push(CHARS[(n & 63) as usize] as char);
+        i += 3;
+    }
+    if i + 2 == bytes.len() {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        out.push(CHARS[((n >> 6) & 63) as usize] as char);
+    } else if i + 1 == bytes.len() {
+        let n = (bytes[i] as u32) << 16;
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+    }
+    out
+}
+
+/// URL-encode minimal pour les paramètres OAuth.
+fn url_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Ouvre l'URL dans le navigateur par défaut.
+fn oauth_open_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        // Sur Windows, on utilise `start` via cmd.exe
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // En WSL, essayer xdg-open puis wslview puis explorer.exe
+        if std::process::Command::new("xdg-open").arg(url).spawn().is_err() {
+            if std::process::Command::new("wslview").arg(url).spawn().is_err() {
+                let _ = std::process::Command::new("/mnt/c/Windows/System32/cmd.exe")
+                    .args(["/C", "start", "", url])
+                    .spawn();
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
 }

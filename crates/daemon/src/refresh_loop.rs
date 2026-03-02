@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::RwLock;
 use tracing::{debug, error, info, warn};
 
 use ai_core::credentials::{AccountData, CredentialsCache};
@@ -39,6 +40,8 @@ pub struct RefreshLoop {
     credentials: Arc<CredentialsCache>,
     http_client: reqwest::Client,
     interval_secs: u64,
+    /// Bus de sync P2P — si présent, broadcast les credentials après un refresh réussi.
+    sync_bus: RwLock<Option<Arc<ai_sync::bus::SyncBus>>>,
 }
 
 impl RefreshLoop {
@@ -53,7 +56,13 @@ impl RefreshLoop {
             credentials,
             http_client,
             interval_secs,
+            sync_bus: RwLock::new(None),
         }
+    }
+
+    /// Configure le bus P2P pour broadcaster les credentials après refresh.
+    pub fn set_sync_bus(&self, bus: Arc<ai_sync::bus::SyncBus>) {
+        *self.sync_bus.write() = Some(bus);
     }
 
     /// Lance la boucle de refresh.
@@ -183,6 +192,32 @@ impl RefreshLoop {
                 match self.credentials.update_oauth(key, new_oauth) {
                     Ok(_) => {
                         info!("Token refreshed for account {}", key);
+
+                        // Broadcast les credentials mis à jour aux pairs P2P.
+                        // Les pairs recevront le nouveau access_token + refresh_token
+                        // et ne re-rafraîchiront pas le compte eux-mêmes (split_quota_fetch).
+                        if let Some(bus) = self.sync_bus.read().clone() {
+                            let instance_id = bus.instance_id().to_string();
+                            let creds = Arc::clone(&self.credentials);
+                            tokio::spawn(async move {
+                                if let Ok(accounts_json) = creds.export_json() {
+                                    let active_key = creds.active_key();
+                                    let clock = bus.next_clock();
+                                    let msg = ai_sync::messages::SyncMessage::new(
+                                        &instance_id,
+                                        ai_sync::messages::SyncPayload::Credentials {
+                                            accounts_json,
+                                            active_key,
+                                            clock,
+                                        },
+                                    );
+                                    if let Err(e) = bus.broadcast(msg).await {
+                                        debug!("Credentials broadcast after token refresh failed: {}", e);
+                                    }
+                                }
+                            });
+                        }
+
                         true
                     }
                     Err(e) => {

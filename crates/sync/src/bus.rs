@@ -87,6 +87,8 @@ pub struct SyncBus {
     dedup: Arc<RwLock<MessageDedup>>,
     /// Credentials pour répondre directement aux SyncRequest entrants (sans peer config symétrique)
     direct_creds: Arc<RwLock<Option<Arc<ai_core::credentials::CredentialsCache>>>>,
+    /// Compteur monotone pour le vector clock local (incrémenté à chaque broadcast).
+    local_clock_counter: std::sync::atomic::AtomicU64,
 }
 
 impl SyncBus {
@@ -105,6 +107,7 @@ impl SyncBus {
             message_tx: tx,
             dedup: Arc::new(RwLock::new(MessageDedup::new())),
             direct_creds: Arc::new(RwLock::new(None)),
+            local_clock_counter: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -196,10 +199,11 @@ impl SyncBus {
                     let data = decrypt(&encrypted, &self.shared_key.0)?;
                     let (msg, detected_proto) = compat::parse_message(&data, &self.instance_id)
                         .map_err(|e| SyncError::Encode(e))?;
-                    debug!("Received message from {} (proto={:?}): id={}", peer_addr, detected_proto, msg.id);
+                    info!("[recv] {} from {} (proto={:?}, id={})", msg.payload.variant_name(), peer_addr, detected_proto, msg.id);
 
                     // Ignore nos propres messages (rebond)
                     if msg.from == self.instance_id {
+                        debug!("[recv] Ignoring own message {}", msg.id);
                         continue;
                     }
 
@@ -245,8 +249,7 @@ impl SyncBus {
                                 match creds.export_json() {
                                     Ok(accounts_json) => {
                                         let active_key = creds.active_key();
-                                        let mut clock = HashMap::new();
-                                        clock.insert(self.instance_id.clone(), 1u64);
+                                        let clock = self.next_clock();
                                         let response = SyncMessage::new(
                                             &self.instance_id,
                                             SyncPayload::SyncResponse {
@@ -429,6 +432,8 @@ impl SyncBus {
     /// Chaque envoi est tenté de manière best-effort (un échec n'arrête pas les autres).
     /// Le message est sérialisé en V2 ou V3 selon le protocole du pair.
     pub async fn broadcast(&self, msg: SyncMessage) -> Result<()> {
+        let payload_type = msg.payload.variant_name();
+
         // Pré-sérialise en V3 (cas le plus courant)
         let v3_data = serde_json::to_vec(&msg)
             .map_err(|e| SyncError::Encode(format!("JSON encode: {e}")))?;
@@ -459,22 +464,37 @@ impl SyncBus {
             .map(|(k, v)| (k.clone(), v.host.clone(), v.port, v.protocol))
             .collect();
 
+        if peers_snapshot.is_empty() {
+            info!("[broadcast] {} — no peers registered, message dropped", payload_type);
+            return Ok(());
+        }
+
+        info!("[broadcast] {} → {} peer(s)", payload_type, peers_snapshot.len());
+
         for (peer_id, host, port, protocol) in &peers_snapshot {
             let encrypted = match protocol {
                 PeerProtocol::V2 => v2_encrypted.as_ref().unwrap_or(&v3_encrypted),
                 _ => &v3_encrypted,
             };
             let addr = format!("{}:{}", host, port);
-            match TcpStream::connect(&addr).await {
-                Ok(mut stream) => {
+            // 5-second timeout to avoid blocking on unreachable peers
+            let connect_result = tokio::time::timeout(
+                Duration::from_secs(5),
+                TcpStream::connect(&addr),
+            ).await;
+            match connect_result {
+                Ok(Ok(mut stream)) => {
                     if let Err(e) = send_frame(&mut stream, encrypted).await {
-                        warn!("Failed to send to peer {}: {}", peer_id, e);
+                        warn!("[broadcast] SEND FAILED to peer {} @ {}: {}", peer_id, addr, e);
                     } else {
-                        debug!("Sent msg {} to peer {} (proto={:?})", msg.id, peer_id, protocol);
+                        info!("[broadcast] {} sent to peer {} @ {} (proto={:?})", payload_type, peer_id, addr, protocol);
                     }
                 }
-                Err(e) => {
-                    warn!("Cannot connect to peer {} @ {}: {}", peer_id, addr, e);
+                Ok(Err(e)) => {
+                    warn!("[broadcast] CONNECT FAILED to peer {} @ {}: {}", peer_id, addr, e);
+                }
+                Err(_) => {
+                    warn!("[broadcast] CONNECT TIMEOUT (5s) to peer {} @ {}", peer_id, addr);
                 }
             }
         }
@@ -519,6 +539,41 @@ impl SyncBus {
             .iter()
             .map(|(id, e)| (id.clone(), e.host.clone(), e.port))
             .collect()
+    }
+
+    /// Broadcast rapide d'une mise à jour de credentials à tous les pairs.
+    ///
+    /// Construit le vecteur d'horloge minimal `{instance_id: 1}` et enveloppe
+    /// dans `SyncPayload::Credentials`. Best-effort (erreur ignorée).
+    /// Retourne un vector clock incrémenté `{instance_id: N}` (N croissant à chaque appel).
+    pub fn next_clock(&self) -> std::collections::HashMap<String, u64> {
+        let n = self.local_clock_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut clock = std::collections::HashMap::new();
+        clock.insert(self.instance_id.clone(), n);
+        clock
+    }
+
+    pub async fn broadcast_credentials_update(
+        &self,
+        accounts_json: String,
+        active_key: Option<String>,
+    ) -> Result<()> {
+        let clock = self.next_clock();
+        let msg = SyncMessage::new(
+            &self.instance_id,
+            SyncPayload::Credentials { accounts_json, active_key, clock },
+        );
+        self.broadcast(msg).await
+    }
+
+    /// Broadcast rapide d'un changement de compte actif à tous les pairs.
+    pub async fn broadcast_account_switch(&self, new_key: String) -> Result<()> {
+        let clock = self.next_clock();
+        let msg = SyncMessage::new(
+            &self.instance_id,
+            SyncPayload::AccountSwitch { new_key, clock },
+        );
+        self.broadcast(msg).await
     }
 }
 

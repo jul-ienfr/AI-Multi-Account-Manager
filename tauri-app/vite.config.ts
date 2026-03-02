@@ -8,7 +8,7 @@ export default defineConfig({
     tailwindcss(),
     svelte(),
   ],
-  base: "/ai-manager/admin/",
+  base: "./",
   clearScreen: false,
   server: {
     port: 1420,

@@ -43,6 +43,8 @@ fn validate_binary_path(path: &str) -> Result<std::path::PathBuf, String> {
     let allowed = [
         "anthrouter",
         "anthrouter.exe",
+        "anthroute",
+        "anthroute.exe",
         "claude-router-auto",
         "claude-router-auto.exe",
         "claude-impersonator",
@@ -98,6 +100,29 @@ fn status_with_uptime(rt: &ProxyInstanceRuntime) -> ProxyStatus {
         }
     }
     s
+}
+
+// ---------------------------------------------------------------------------
+// Helper interne — collecte le statut de toutes les instances (pour broadcast)
+// ---------------------------------------------------------------------------
+
+fn collect_proxy_status(state: &DaemonState) -> Vec<ai_sync::messages::ProxyInstanceStatus> {
+    let cfg = state.config.read();
+    let instances_rt = state.proxy_instances.read();
+    cfg.proxy.instances.iter().map(|inst| {
+        let status = instances_rt
+            .get(&inst.id)
+            .map(|rt| status_with_uptime(rt))
+            .unwrap_or_else(|| ProxyStatus { port: inst.port, ..Default::default() });
+        ai_sync::messages::ProxyInstanceStatus {
+            id: inst.id.clone(),
+            name: inst.name.clone(),
+            running: status.running,
+            port: if status.running { Some(status.port) } else { None },
+            pid: status.pid,
+            uptime_secs: if status.running { Some(status.uptime_secs) } else { None },
+        }
+    }).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +438,28 @@ pub async fn add_instance(
     }
 
     info!("Proxy instance added: {} ({})", config.name, config.id);
+
+    // Broadcast ProxyConfigUpdate (add) to P2P peers
+    if let Some(bus) = &state.sync_bus {
+        let bus = bus.clone();
+        let instance_id = bus.instance_id().to_string();
+        let proxy_id = config.id.clone();
+        let config_json = serde_json::to_string(&config).unwrap_or_default();
+        tokio::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::ProxyConfigUpdate {
+                    action: "add".into(),
+                    instance_id: proxy_id,
+                    config_json: Some(config_json),
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
+
     ok_json(json!({"ok": true}))
 }
 
@@ -461,6 +508,34 @@ pub async fn update_instance(
     }
 
     info!("Proxy instance updated: {}", id);
+
+    // Broadcast ProxyConfigUpdate (update) to P2P peers
+    if let Some(bus) = &state.sync_bus {
+        let bus = bus.clone();
+        let instance_id = bus.instance_id().to_string();
+        let proxy_id = id.clone();
+        let updated_config_json = {
+            let cfg = state.config.read();
+            cfg.proxy.instances.iter()
+                .find(|i| i.id == proxy_id)
+                .and_then(|i| serde_json::to_string(i).ok())
+                .unwrap_or_default()
+        };
+        tokio::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::ProxyConfigUpdate {
+                    action: "update".into(),
+                    instance_id: proxy_id,
+                    config_json: Some(updated_config_json),
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
+
     ok_json(json!({"ok": true}))
 }
 
@@ -501,6 +576,27 @@ pub async fn delete_instance(
     }
 
     info!("Proxy instance deleted: {}", id);
+
+    // Broadcast ProxyConfigUpdate (delete) to P2P peers
+    if let Some(bus) = &state.sync_bus {
+        let bus = bus.clone();
+        let instance_id = bus.instance_id().to_string();
+        let proxy_id = id.clone();
+        tokio::spawn(async move {
+            let clock = bus.next_clock();
+            let msg = ai_sync::messages::SyncMessage::new(
+                &instance_id,
+                ai_sync::messages::SyncPayload::ProxyConfigUpdate {
+                    action: "delete".into(),
+                    instance_id: proxy_id,
+                    config_json: None,
+                    clock,
+                },
+            );
+            let _ = bus.broadcast(msg).await;
+        });
+    }
+
     ok_json(json!({"ok": true}))
 }
 
@@ -510,7 +606,27 @@ pub async fn start_instance(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match start_instance_by_id(&state, &id).await {
-        Ok(()) => ok_json(json!({"ok": true})),
+        Ok(()) => {
+            // Broadcast ProxyStatusBroadcast to P2P peers
+            if let Some(bus) = &state.sync_bus {
+                let bus = bus.clone();
+                let instance_id = bus.instance_id().to_string();
+                let instances = collect_proxy_status(&state);
+                tokio::spawn(async move {
+                    let clock = bus.next_clock();
+                    let msg = ai_sync::messages::SyncMessage::new(
+                        &instance_id,
+                        ai_sync::messages::SyncPayload::ProxyStatusBroadcast {
+                            from_machine_id: instance_id.clone(),
+                            instances,
+                            clock,
+                        },
+                    );
+                    let _ = bus.broadcast(msg).await;
+                });
+            }
+            ok_json(json!({"ok": true}))
+        }
         Err(e) => {
             if e.contains("not found") {
                 error_json(404, &e)
@@ -529,7 +645,27 @@ pub async fn stop_instance(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match stop_instance_by_id(&state, &id).await {
-        Ok(()) => ok_json(json!({"ok": true})),
+        Ok(()) => {
+            // Broadcast ProxyStatusBroadcast to P2P peers
+            if let Some(bus) = &state.sync_bus {
+                let bus = bus.clone();
+                let instance_id = bus.instance_id().to_string();
+                let instances = collect_proxy_status(&state);
+                tokio::spawn(async move {
+                    let clock = bus.next_clock();
+                    let msg = ai_sync::messages::SyncMessage::new(
+                        &instance_id,
+                        ai_sync::messages::SyncPayload::ProxyStatusBroadcast {
+                            from_machine_id: instance_id.clone(),
+                            instances,
+                            clock,
+                        },
+                    );
+                    let _ = bus.broadcast(msg).await;
+                });
+            }
+            ok_json(json!({"ok": true}))
+        }
         Err(e) => {
             if e.contains("not found") {
                 error_json(404, &e)
@@ -549,7 +685,27 @@ pub async fn restart_instance(
         return error_json(if e.contains("not found") { 404 } else { 500 }, &e);
     }
     match start_instance_by_id(&state, &id).await {
-        Ok(()) => ok_json(json!({"ok": true})),
+        Ok(()) => {
+            // Broadcast ProxyStatusBroadcast to P2P peers
+            if let Some(bus) = &state.sync_bus {
+                let bus = bus.clone();
+                let instance_id = bus.instance_id().to_string();
+                let instances = collect_proxy_status(&state);
+                tokio::spawn(async move {
+                    let clock = bus.next_clock();
+                    let msg = ai_sync::messages::SyncMessage::new(
+                        &instance_id,
+                        ai_sync::messages::SyncPayload::ProxyStatusBroadcast {
+                            from_machine_id: instance_id.clone(),
+                            instances,
+                            clock,
+                        },
+                    );
+                    let _ = bus.broadcast(msg).await;
+                });
+            }
+            ok_json(json!({"ok": true}))
+        }
         Err(e) => error_json(500, &e),
     }
 }
@@ -652,18 +808,51 @@ pub async fn list_binaries() -> impl IntoResponse {
         }
     }
 
+    // Dossiers de recherche : dossier "AI Manager" remonté + dossier du daemon lui-même
+    let search_dirs = [root.as_path(), exe_dir];
+
+    let mut binaries: Vec<DetectedBinary> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // --- anthrouter : cherche dans les dossiers de build (target/) et fallback direct ---
+    // Noms possibles du binaire : claude-router-auto, anthroute (sans 'r'), anthrouter
+    let anthrouter_build_paths = [
+        "anthrouter/target/x86_64-pc-windows-gnu/release/claude-router-auto.exe",
+        "anthrouter/target/x86_64-pc-windows-gnu/release/anthroute.exe",
+        "anthrouter/target/x86_64-pc-windows-gnu/release/anthrouter.exe",
+        "anthrouter/target/release/claude-router-auto",
+        "anthrouter/target/release/anthroute",
+        "anthrouter/target/release/anthrouter",
+        "anthrouter/claude-router-auto.exe",
+        "anthrouter/anthroute.exe",
+        "anthrouter/anthrouter.exe",
+        "anthrouter/claude-router-auto",
+        "anthrouter/anthroute",
+        "anthrouter/anthrouter",
+    ];
+    'anthrouter_search: for search_dir in &search_dirs {
+        for rel in &anthrouter_build_paths {
+            let p = search_dir.join(rel);
+            if p.exists() {
+                binaries.push(DetectedBinary {
+                    id: "router-rust".to_string(),
+                    name: "anthrouter".to_string(),
+                    path: p.to_string_lossy().to_string(),
+                    default_port: 18080,
+                });
+                seen_ids.insert("router-rust".to_string());
+                break 'anthrouter_search;
+            }
+        }
+    }
+
+    // --- Autres binaires legacy (claude-impersonator, claude-translator) ---
     let candidates = [
-        (
-            "router-rust",
-            "anthrouter",
-            "anthrouter/anthrouter.exe",
-            18080u16,
-        ),
         (
             "impersonator-rust",
             "claude-impersonator",
             "claude-impersonator.exe",
-            18081,
+            18081u16,
         ),
         (
             "translator-rust",
@@ -672,12 +861,6 @@ pub async fn list_binaries() -> impl IntoResponse {
             18082,
         ),
     ];
-
-    // Dossiers de recherche : dossier "AI Manager" remonté + dossier du daemon lui-même
-    let search_dirs = [root.as_path(), exe_dir];
-
-    let mut binaries: Vec<DetectedBinary> = Vec::new();
-    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (id, name, rel_path, port) in &candidates {
         if seen_ids.contains(*id) {

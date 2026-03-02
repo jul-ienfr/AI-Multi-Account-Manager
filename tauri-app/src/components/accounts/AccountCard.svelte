@@ -22,6 +22,11 @@
   let showPriorityInput = $state(false);
   let priorityValue = $state(50);
 
+  // Edit dialog (plan type + GCP project)
+  let showEditDialog = $state(false);
+  let editPlanType = $state("pro");
+  let editGcpProject = $state("");
+
   const providerColors: Record<string, string> = {
     anthropic: "var(--provider-anthropic)",
     gemini: "var(--provider-gemini)",
@@ -204,6 +209,26 @@
       await accounts.refresh(account.key);
     } catch (e) {
       toast.error("Refresh token echoue", String(e));
+    }
+  }
+
+  function handleOpenEdit() {
+    closeContextMenu();
+    editPlanType = account.data.planType ?? "pro";
+    editGcpProject = (account.data as any).geminiProject ?? "";
+    showEditDialog = true;
+  }
+
+  async function handleSaveEdit() {
+    try {
+      await accounts.updateAccount(account.key, {
+        planType: editPlanType,
+        geminiProject: editGcpProject,
+      });
+      showEditDialog = false;
+      toast.success("Paramètres mis à jour", "");
+    } catch (e) {
+      toast.error("Erreur", String(e));
     }
   }
 </script>
@@ -397,6 +422,11 @@
       </button>
     {/if}
 
+    <button class="context-item" onclick={handleOpenEdit}>
+      <SlidersHorizontal size={14} />
+      <span>Paramètres (plan, GCP)</span>
+    </button>
+
     <div class="context-divider"></div>
 
     {#if !isApiAccount}
@@ -410,6 +440,41 @@
       <Trash2 size={14} />
       <span>Supprimer</span>
     </button>
+  </div>
+{/if}
+
+{#if showEditDialog}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="edit-overlay" onclick={() => (showEditDialog = false)} onkeydown={() => {}}></div>
+  <div class="edit-modal">
+    <div class="edit-modal-title">Paramètres — {account.data.email ?? account.key}</div>
+
+    <div class="edit-modal-field">
+      <label class="edit-modal-label" for="edit-plan-{account.key}">Type de plan</label>
+      <select id="edit-plan-{account.key}" class="edit-modal-input" bind:value={editPlanType}>
+        <option value="pro">Pro</option>
+        <option value="max_x5">Max x5</option>
+        <option value="max_x20">Max x20</option>
+      </select>
+      <span class="edit-modal-hint">Pro = standard · Max x5 = 5× · Max x20 = 20×</span>
+    </div>
+
+    <div class="edit-modal-field">
+      <label class="edit-modal-label" for="edit-gcp-{account.key}">GCP Project ID</label>
+      <input
+        id="edit-gcp-{account.key}"
+        type="text"
+        class="edit-modal-input"
+        placeholder="ex: calm-snowfall-488419-s7"
+        bind:value={editGcpProject}
+      />
+      <span class="edit-modal-hint">Projet Google Cloud (geminicodeassist.project)</span>
+    </div>
+
+    <div class="edit-modal-actions">
+      <button class="edit-modal-btn edit-modal-btn-primary" onclick={handleSaveEdit}>Enregistrer</button>
+      <button class="edit-modal-btn" onclick={() => (showEditDialog = false)}>Annuler</button>
+    </div>
   </div>
 {/if}
 
@@ -693,5 +758,106 @@
     border-radius: var(--radius-sm);
     cursor: pointer;
     font-weight: 600;
+  }
+
+  /* Edit dialog (plan type + GCP project) */
+  .edit-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    background: rgba(0, 0, 0, 0.5);
+  }
+
+  .edit-modal {
+    position: fixed;
+    z-index: 100;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 400px;
+    max-width: calc(100vw - 32px);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .edit-modal-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--fg-primary);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 10px;
+  }
+
+  .edit-modal-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .edit-modal-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--fg-secondary);
+  }
+
+  .edit-modal-input {
+    padding: 7px 10px;
+    background: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--fg-primary);
+    font-size: 13px;
+    font-family: inherit;
+  }
+
+  .edit-modal-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  .edit-modal-hint {
+    font-size: 11px;
+    color: var(--fg-dim);
+    line-height: 1.4;
+  }
+
+  .edit-modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    padding-top: 4px;
+  }
+
+  .edit-modal-btn {
+    padding: 6px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--bg-app);
+    color: var(--fg-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .edit-modal-btn:hover {
+    background: var(--bg-card-hover);
+    color: var(--fg-primary);
+  }
+
+  .edit-modal-btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg-app);
+  }
+
+  .edit-modal-btn-primary:hover {
+    opacity: 0.9;
   }
 </style>

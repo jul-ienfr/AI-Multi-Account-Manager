@@ -33,6 +33,9 @@ pub struct AppConfig {
     /// Cibles webhook Discord/Slack/Generic.
     #[serde(default)]
     pub webhooks: Vec<crate::webhook::WebhookTarget>,
+    /// Google OAuth credentials pour le flux Gemini (optionnel).
+    #[serde(default)]
+    pub gemini_oauth: GeminiOAuthConfig,
 }
 
 impl Default for AppConfig {
@@ -45,8 +48,18 @@ impl Default for AppConfig {
             alerts: AlertsConfig::default(),
             schedule: ScheduleConfig::default(),
             webhooks: Vec::new(),
+            gemini_oauth: GeminiOAuthConfig::default(),
         }
     }
+}
+
+/// Credentials Google OAuth pour le flux Gemini CLI.
+/// Configurable via les Paramètres de l'application.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GeminiOAuthConfig {
+    pub client_id: String,
+    pub client_secret: String,
 }
 
 /// Configuration du proxy (router + anthrouter + custom instances).

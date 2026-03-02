@@ -326,11 +326,20 @@ fn v3_payload_to_v2(payload: &SyncPayload) -> Option<(String, Value)> {
             Some(("ack".to_string(), Value::Object(Default::default())))
         }
 
-        // Types V3-only (pipeline avancé) — pas d'équivalent V2
+        // Types V3-only (pipeline avancé et nouveaux) — pas d'équivalent V2
         SyncPayload::HandshakeRequest { .. }
         | SyncPayload::HandshakeResponse { .. }
         | SyncPayload::DiffRequest { .. }
-        | SyncPayload::DiffResponse { .. } => {
+        | SyncPayload::DiffResponse { .. }
+        | SyncPayload::ConfigUpdate { .. }
+        | SyncPayload::PeerConfigUpdate { .. }
+        | SyncPayload::ProfileUpdate { .. }
+        | SyncPayload::ProxyConfigUpdate { .. }
+        | SyncPayload::ProxyCommand { .. }
+        | SyncPayload::ProxyStatusBroadcast { .. }
+        | SyncPayload::IntegrationSetup { .. }
+        | SyncPayload::SshHostUpdate { .. }
+        | SyncPayload::InvalidGrantUpdate { .. } => {
             debug!("V3 pipeline message has no V2 equivalent, skipping");
             None
         }

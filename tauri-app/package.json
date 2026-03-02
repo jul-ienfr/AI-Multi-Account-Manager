@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@rollup/rollup-linux-x64-gnu": "^4.59.0",
+    "@tauri-apps/api": "^2.10.1",
     "chart.js": "^4",
     "lucide-svelte": "latest",
     "svelte": "^5",

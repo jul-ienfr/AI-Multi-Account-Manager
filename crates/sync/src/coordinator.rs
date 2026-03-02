@@ -39,7 +39,7 @@ use tracing::{debug, info, warn};
 use crate::bus::SyncBus;
 use crate::error::{Result, SyncError};
 use crate::messages::{
-    DiffSummary, HandshakeSummary, SyncMessage, SyncPayload, VectorClock,
+    DiffSummary, HandshakeSummary, ProxyInstanceStatus, SyncMessage, SyncPayload, VectorClock,
 };
 use crate::outbox::Outbox;
 
@@ -561,6 +561,8 @@ pub struct SyncCoordinator {
     /// Ensemble des pairs autorisés (instance_id). Si vide, tous les pairs sont acceptés
     /// (mode ouvert — pour la rétrocompatibilité et les tests sans configuration explicite).
     known_peers: RwLock<HashSet<String>>,
+    /// Cache d'état des proxies distants : machine_id → liste d'instances.
+    remote_proxy_status: Arc<RwLock<HashMap<String, Vec<ProxyInstanceStatus>>>>,
 }
 
 impl SyncCoordinator {
@@ -607,6 +609,7 @@ impl SyncCoordinator {
             clock: Arc::new(RwLock::new(clock)),
             outbox: parking_lot::Mutex::new(outbox),
             known_peers: RwLock::new(known_peers),
+            remote_proxy_status: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -832,10 +835,10 @@ impl SyncCoordinator {
 
     /// Traite un message reçu.
     async fn handle_message(&self, msg: SyncMessage) -> Result<()> {
-        debug!(
-            "Handling message from={} type={:?}",
+        info!(
+            "[coordinator] Handling {} from={}",
+            msg.payload.variant_name(),
             msg.from,
-            std::mem::discriminant(&msg.payload)
         );
 
         match msg.payload {
@@ -936,6 +939,46 @@ impl SyncCoordinator {
                     let mut clock = self.clock.write();
                     *clock = Self::merge_clocks(&clock, &merged_clock);
                 }
+            }
+
+            // ----------------------------------------------------------------
+            // Nouveaux types de messages (Phase 5.x)
+            // ----------------------------------------------------------------
+
+            SyncPayload::ConfigUpdate { config_json, clock: _ } => {
+                self.handle_config_update(&msg.from, config_json).await;
+            }
+
+            SyncPayload::PeerConfigUpdate { action, peer_id, host, port, shared_key_hex, clock: _ } => {
+                self.handle_peer_config_update(&msg.from, &action, peer_id, host, port, shared_key_hex).await;
+            }
+
+            SyncPayload::ProfileUpdate { name, config_json, clock: _ } => {
+                self.handle_profile_update(&msg.from, &name, config_json).await;
+            }
+
+            SyncPayload::ProxyConfigUpdate { action, instance_id, config_json, clock: _ } => {
+                self.handle_proxy_config_update(&msg.from, &action, &instance_id, config_json).await;
+            }
+
+            SyncPayload::ProxyCommand { target_machine_id, instance_id, action, clock: _ } => {
+                self.handle_proxy_command(&msg.from, &target_machine_id, &instance_id, &action).await;
+            }
+
+            SyncPayload::ProxyStatusBroadcast { from_machine_id, instances, clock: _ } => {
+                self.handle_proxy_status_broadcast(&from_machine_id, instances).await;
+            }
+
+            SyncPayload::IntegrationSetup { kind, action, port, target_machine_id, clock: _ } => {
+                self.handle_integration_setup(&msg.from, &kind, &action, port, &target_machine_id).await;
+            }
+
+            SyncPayload::SshHostUpdate { action, host_id, host_json, clock: _ } => {
+                self.handle_ssh_host_update(&msg.from, &action, &host_id, host_json).await;
+            }
+
+            SyncPayload::InvalidGrantUpdate { invalid_keys, clock: _ } => {
+                self.handle_invalid_grant_update(&msg.from, invalid_keys).await;
             }
         }
 
@@ -1191,6 +1234,140 @@ impl SyncCoordinator {
     /// Retourne le clock vectoriel actuel (copie).
     pub fn current_clock(&self) -> VectorClock {
         self.clock.read().clone()
+    }
+
+    /// Retourne une copie du cache d'état des proxies distants.
+    pub fn remote_proxy_status(&self) -> HashMap<String, Vec<ProxyInstanceStatus>> {
+        self.remote_proxy_status.read().clone()
+    }
+
+    // ----------------------------------------------------------------
+    // Handlers pour les nouveaux types de messages (Phase 5.x)
+    // ----------------------------------------------------------------
+
+    async fn handle_config_update(&self, from: &str, config_json: String) {
+        // Le coordinateur n'a pas accès direct à AppConfig.
+        // Les consommateurs (Tauri/Daemon) traitent cet événement via leur abonné broadcast.
+        // On se contente de logger pour traçabilité.
+        info!("Config update received from {}: {} bytes", from, config_json.len());
+    }
+
+    async fn handle_peer_config_update(
+        &self,
+        from: &str,
+        action: &str,
+        peer_id: Option<String>,
+        host: Option<String>,
+        port: Option<u16>,
+        shared_key_hex: Option<String>,
+    ) {
+        // La gestion des pairs est faite au niveau applicatif via l'abonné broadcast.
+        let _ = (host, port, shared_key_hex); // champs utilisés par la couche applicative
+        info!(
+            "Peer config update from {}: action={}, peer_id={:?}",
+            from, action, peer_id
+        );
+    }
+
+    async fn handle_profile_update(&self, from: &str, name: &str, config_json: Option<String>) {
+        info!(
+            "Profile update from {}: name={}, deleted={}",
+            from,
+            name,
+            config_json.is_none()
+        );
+    }
+
+    async fn handle_proxy_config_update(
+        &self,
+        from: &str,
+        action: &str,
+        instance_id: &str,
+        config_json: Option<String>,
+    ) {
+        let _ = config_json; // utilisé par la couche applicative
+        info!(
+            "Proxy config update from {}: action={}, instance_id={}",
+            from, action, instance_id
+        );
+    }
+
+    async fn handle_proxy_command(
+        &self,
+        from: &str,
+        target_machine_id: &str,
+        instance_id: &str,
+        action: &str,
+    ) {
+        // L'exécution de la commande est gérée au niveau applicatif via l'abonné broadcast.
+        if target_machine_id == self.instance_id {
+            info!(
+                "Proxy command targeting THIS machine from {}: {}:{}",
+                from, instance_id, action
+            );
+        } else {
+            debug!(
+                "Proxy command for machine {} (not us) from {}",
+                target_machine_id, from
+            );
+        }
+    }
+
+    async fn handle_proxy_status_broadcast(
+        &self,
+        from: &str,
+        instances: Vec<ProxyInstanceStatus>,
+    ) {
+        let count = instances.len();
+        self.remote_proxy_status
+            .write()
+            .insert(from.to_string(), instances);
+        debug!("Proxy status from {}: {} instances", from, count);
+    }
+
+    async fn handle_integration_setup(
+        &self,
+        from: &str,
+        kind: &str,
+        action: &str,
+        port: Option<u16>,
+        target_machine_id: &str,
+    ) {
+        let _ = port; // utilisé par la couche applicative
+        if target_machine_id == self.instance_id {
+            info!(
+                "Integration setup targeting THIS machine from {}: {}:{}",
+                from, kind, action
+            );
+        } else {
+            debug!(
+                "Integration setup for machine {} (not us) from {}",
+                target_machine_id, from
+            );
+        }
+    }
+
+    async fn handle_ssh_host_update(
+        &self,
+        from: &str,
+        action: &str,
+        host_id: &str,
+        host_json: Option<String>,
+    ) {
+        let _ = host_json; // utilisé par la couche applicative
+        info!(
+            "SSH host update from {}: action={}, host_id={}",
+            from, action, host_id
+        );
+    }
+
+    async fn handle_invalid_grant_update(&self, from: &str, invalid_keys: Vec<String>) {
+        info!(
+            "Invalid grant update from {}: {} account(s) flagged",
+            from,
+            invalid_keys.len()
+        );
+        // La couche applicative (Tauri/Daemon) gère le merge via le broadcast subscriber.
     }
 }
 

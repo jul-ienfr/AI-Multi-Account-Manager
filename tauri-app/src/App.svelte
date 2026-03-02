@@ -7,7 +7,7 @@
   import Monitoring from "./routes/Monitoring.svelte";
   import Settings from "./routes/Settings.svelte";
   import { accounts } from "./lib/stores/accounts";
-  import { onQuotaUpdate, onToast, onAccountSwitch } from "./lib/tauri";
+  import { onQuotaUpdate, onToast, onAccountSwitch, onSyncRefresh } from "./lib/tauri";
   import { toast } from "./lib/stores/toast";
   import { onMount } from "svelte";
   import { fade } from "svelte/transition";
@@ -32,7 +32,8 @@
     }
     onQuotaUpdate(({ key, quota }) => accounts.updateQuota(key, quota));
     onToast((t: any) => (toast as any)[t.type]?.(t.title, t.message));
-    onAccountSwitch((key) => accounts.switch(key).catch(e => console.error("Account switch failed:", e)));
+    onAccountSwitch((key) => accounts.setActive(key));
+    onSyncRefresh(() => accounts.load().catch(e => console.error("Sync refresh failed:", e)));
   });
 
   // Keyboard navigation (Phase 7.7)

@@ -54,17 +54,105 @@ pub struct ClientMatch {
 
 fn build_registry() -> Vec<ClientSignature> {
     vec![
-        // --- Seul client natif : Claude Code (CLI + VS Code) ---
-        // Détecté via user-agent "claude-cli/" qui est unique à Claude Code.
-        // Tout le reste sera impersonaté par le fallback dans impersonation.rs.
+        // --- Claude Code (CLI + VS Code) — client natif, pas d'impersonation ---
+        // Détecté via :
+        //   - user-agent "claude-cli/" (CLI v3+, extension VSCode)
+        //   - user-agent "claude-code" (V2 compatibility)
+        //   - anthropic-client-type: claude-code (header explicite)
+        // (port de V2 signatures.py + règle claude-cli/ native V3)
         ClientSignature {
             client_name: "claude-code".to_string(),
             provider: "anthropic".to_string(),
             rules: vec![
                 MatchRule::Contains("user-agent".to_string(), "claude-cli/".to_string()),
+                MatchRule::Contains("user-agent".to_string(), "claude-code".to_string()),
+                MatchRule::Equals("anthropic-client-type".to_string(), "claude-code".to_string()),
             ],
             mode: MatchMode::Any,
             is_known: true,
+        },
+        // --- Claude Web ---
+        ClientSignature {
+            client_name: "claude-web".to_string(),
+            provider: "anthropic".to_string(),
+            rules: vec![
+                MatchRule::Contains("user-agent".to_string(), "claude.ai".to_string()),
+            ],
+            mode: MatchMode::Any,
+            is_known: false,
+        },
+        // --- Gemini CLI ---
+        ClientSignature {
+            client_name: "gemini-cli".to_string(),
+            provider: "gemini".to_string(),
+            rules: vec![
+                MatchRule::Contains("user-agent".to_string(), "google-gemini-cli".to_string()),
+                MatchRule::Contains("x-goog-api-client".to_string(), "gemini-cli".to_string()),
+            ],
+            mode: MatchMode::Any,
+            is_known: false,
+        },
+        // --- Gemini Code Assist ---
+        ClientSignature {
+            client_name: "gemini-code-assist".to_string(),
+            provider: "gemini".to_string(),
+            rules: vec![
+                MatchRule::Contains("user-agent".to_string(), "gemini-code-assist".to_string()),
+                MatchRule::Contains("x-goog-api-client".to_string(), "code-assist".to_string()),
+            ],
+            mode: MatchMode::Any,
+            is_known: false,
+        },
+        // --- OpenAI Python SDK ---
+        ClientSignature {
+            client_name: "openai-python".to_string(),
+            provider: "openai".to_string(),
+            rules: vec![
+                MatchRule::Contains("user-agent".to_string(), "OpenAI/Python".to_string()),
+            ],
+            mode: MatchMode::Any,
+            is_known: false,
+        },
+        // --- OpenAI Node SDK ---
+        ClientSignature {
+            client_name: "openai-node".to_string(),
+            provider: "openai".to_string(),
+            rules: vec![
+                MatchRule::Contains("user-agent".to_string(), "OpenAI/JS".to_string()),
+            ],
+            mode: MatchMode::Any,
+            is_known: false,
+        },
+        // --- ChatGPT ---
+        ClientSignature {
+            client_name: "chatgpt".to_string(),
+            provider: "openai".to_string(),
+            rules: vec![
+                MatchRule::Contains("user-agent".to_string(), "ChatGPT".to_string()),
+            ],
+            mode: MatchMode::Any,
+            is_known: false,
+        },
+        // --- Grok / xAI ---
+        ClientSignature {
+            client_name: "grok".to_string(),
+            provider: "xai".to_string(),
+            rules: vec![
+                MatchRule::Contains("user-agent".to_string(), "grok".to_string()),
+                MatchRule::Exists("x-grok-client".to_string()),
+            ],
+            mode: MatchMode::Any,
+            is_known: false,
+        },
+        // --- DeepSeek ---
+        ClientSignature {
+            client_name: "deepseek".to_string(),
+            provider: "deepseek".to_string(),
+            rules: vec![
+                MatchRule::Contains("user-agent".to_string(), "deepseek".to_string()),
+            ],
+            mode: MatchMode::Any,
+            is_known: false,
         },
     ]
 }
@@ -174,5 +262,39 @@ mod tests {
         let mut h = HashMap::new();
         h.insert("user-agent".to_string(), "python-httpx/0.27.0".to_string());
         assert!(detect_client(&h).is_none());
+    }
+
+    #[test]
+    fn test_gemini_cli_detected() {
+        let mut h = HashMap::new();
+        h.insert("user-agent".to_string(), "google-gemini-cli/1.0.0".to_string());
+        let m = detect_client(&h).unwrap();
+        assert_eq!(m.client_name, "gemini-cli");
+        assert_eq!(m.provider, "gemini");
+        assert!(!m.is_known);
+        assert!(m.should_impersonate);
+    }
+
+    #[test]
+    fn test_openai_python_detected() {
+        let mut h = HashMap::new();
+        h.insert("user-agent".to_string(), "OpenAI/Python 1.23.0".to_string());
+        let m = detect_client(&h).unwrap();
+        assert_eq!(m.client_name, "openai-python");
+        assert_eq!(m.provider, "openai");
+        assert!(!m.is_known);
+        assert!(m.should_impersonate);
+    }
+
+    #[test]
+    fn test_claude_code_via_anthropic_client_type() {
+        // Claude Code peut aussi s'identifier via ce header (V2 compat)
+        let mut h = HashMap::new();
+        h.insert("user-agent".to_string(), "my-wrapper/1.0".to_string());
+        h.insert("anthropic-client-type".to_string(), "claude-code".to_string());
+        let m = detect_client(&h).unwrap();
+        assert_eq!(m.client_name, "claude-code");
+        assert!(m.is_known);
+        assert!(!m.should_impersonate);
     }
 }

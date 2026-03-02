@@ -111,6 +111,126 @@ pub enum SyncPayload {
         /// Nombre de comptes importés lors du APPLY.
         accounts_applied: usize,
     },
+
+    /// Mise à jour de la configuration partagée (thresholds, strategy, etc.)
+    ConfigUpdate {
+        config_json: String,
+        clock: VectorClock,
+    },
+
+    /// Mise à jour de la liste des pairs ou de la clé de chiffrement sync.
+    PeerConfigUpdate {
+        /// "add" | "remove" | "set_key" | "set_port"
+        action: String,
+        peer_id: Option<String>,
+        host: Option<String>,
+        port: Option<u16>,
+        shared_key_hex: Option<String>,
+        clock: VectorClock,
+    },
+
+    /// Sauvegarde ou suppression d'un profil.
+    ProfileUpdate {
+        name: String,
+        /// None = suppression
+        config_json: Option<String>,
+        clock: VectorClock,
+    },
+
+    /// Ajout, mise à jour ou suppression d'une instance proxy.
+    ProxyConfigUpdate {
+        /// "add" | "update" | "delete"
+        action: String,
+        instance_id: String,
+        /// None = suppression
+        config_json: Option<String>,
+        clock: VectorClock,
+    },
+
+    /// Commande distante start/stop/restart sur une instance proxy.
+    ProxyCommand {
+        /// Instance ID de la machine cible (seule cette machine exécute la commande)
+        target_machine_id: String,
+        instance_id: String,
+        /// "start" | "stop" | "restart"
+        action: String,
+        clock: VectorClock,
+    },
+
+    /// Broadcast d'état des proxies d'une machine (pour visibilité cross-machine).
+    ProxyStatusBroadcast {
+        from_machine_id: String,
+        instances: Vec<ProxyInstanceStatus>,
+        clock: VectorClock,
+    },
+
+    /// Setup ou suppression d'une intégration Claude Code / VS Code sur une machine distante.
+    IntegrationSetup {
+        /// "claude_code" | "vscode"
+        kind: String,
+        /// "setup" | "remove"
+        action: String,
+        port: Option<u16>,
+        /// Seule cette machine exécute l'opération
+        target_machine_id: String,
+        clock: VectorClock,
+    },
+
+    /// Ajout ou suppression d'un hôte SSH.
+    SshHostUpdate {
+        /// "add" | "remove"
+        action: String,
+        host_id: String,
+        /// None = suppression
+        host_json: Option<String>,
+        clock: VectorClock,
+    },
+
+    /// Synchronisation de l'ensemble des comptes en invalid_grant.
+    InvalidGrantUpdate {
+        /// Clés des comptes actuellement marqués invalid_grant sur l'émetteur.
+        invalid_keys: Vec<String>,
+        clock: VectorClock,
+    },
+}
+
+impl SyncPayload {
+    /// Returns a human-readable name for the payload variant (for logging).
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Credentials { .. } => "Credentials",
+            Self::AccountSwitch { .. } => "AccountSwitch",
+            Self::QuotaUpdate { .. } => "QuotaUpdate",
+            Self::Heartbeat { .. } => "Heartbeat",
+            Self::SyncRequest { .. } => "SyncRequest",
+            Self::SyncResponse { .. } => "SyncResponse",
+            Self::HandshakeRequest { .. } => "HandshakeRequest",
+            Self::HandshakeResponse { .. } => "HandshakeResponse",
+            Self::DiffRequest { .. } => "DiffRequest",
+            Self::DiffResponse { .. } => "DiffResponse",
+            Self::PipelineAck { .. } => "PipelineAck",
+            Self::ConfigUpdate { .. } => "ConfigUpdate",
+            Self::PeerConfigUpdate { .. } => "PeerConfigUpdate",
+            Self::ProfileUpdate { .. } => "ProfileUpdate",
+            Self::ProxyConfigUpdate { .. } => "ProxyConfigUpdate",
+            Self::ProxyCommand { .. } => "ProxyCommand",
+            Self::ProxyStatusBroadcast { .. } => "ProxyStatusBroadcast",
+            Self::IntegrationSetup { .. } => "IntegrationSetup",
+            Self::SshHostUpdate { .. } => "SshHostUpdate",
+            Self::InvalidGrantUpdate { .. } => "InvalidGrantUpdate",
+        }
+    }
+}
+
+/// Statut d'une instance proxy d'une machine distante.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyInstanceStatus {
+    pub id: String,
+    pub name: String,
+    pub running: bool,
+    pub port: Option<u16>,
+    pub pid: Option<u32>,
+    pub uptime_secs: Option<u64>,
 }
 
 // ----------------------------------------------------------------
