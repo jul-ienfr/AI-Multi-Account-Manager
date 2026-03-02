@@ -47,8 +47,10 @@ pub struct AppState {
     pub model_config: Arc<model_mapping::ModelMappingConfig>,
     /// Shutdown channel
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,
-    /// Quota info par provider (extrait des réponses upstream)
-    pub provider_quota: Arc<std::sync::Mutex<std::collections::HashMap<String, Value>>>,
+    /// Quota info par provider (extrait des réponses upstream).
+    /// Utilise `parking_lot::Mutex` (non empoisonnable) pour éviter les panics
+    /// en cascade si un thread panic en tenant ce verrou.
+    pub provider_quota: Arc<parking_lot::Mutex<std::collections::HashMap<String, Value>>>,
     /// Verbose logging (headers + body)
     pub verbose: Arc<AtomicBool>,
     /// Rate limiter par IP
@@ -71,13 +73,12 @@ pub async fn proxy_health() -> impl IntoResponse {
 
 pub async fn proxy_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let account = state.credentials.get_active();
-    let last_client = state.imp.last_client.lock().unwrap().clone();
-    let last_client_fmt = state.imp.last_client_format.lock().unwrap().clone();
-    let last_server_fmt = state.imp.last_server_format.lock().unwrap().clone();
-    let last_model = state.imp.last_model.lock().unwrap().clone();
-    let last_client_ip = state.last_client_ip.lock().clone();
 
-    let quota = state.provider_quota.lock().unwrap().clone();
+    // Snapshot atomique : un seul verrou pour les 4 champs last_*.
+    // Ordre d'acquisition fixe et documenté : meta → last_client_ip → provider_quota.
+    let meta_snapshot = state.imp.meta.lock().clone();
+    let last_client_ip = state.last_client_ip.lock().clone();
+    let quota = state.provider_quota.lock().clone();
 
     Json(json!({
         "status": "running",
@@ -91,10 +92,10 @@ pub async fn proxy_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
         "api_url": account.as_ref().and_then(|a| a.api_url.as_deref()),
         "impersonation_enabled": state.imp.enabled,
         "auto_capture_enabled": state.imp.auto_capture,
-        "client_format": last_client_fmt,
-        "server_format": last_server_fmt,
-        "last_model": last_model,
-        "last_client": last_client,
+        "client_format": meta_snapshot.last_client_format,
+        "server_format": meta_snapshot.last_server_format,
+        "last_model": meta_snapshot.last_model,
+        "last_client": meta_snapshot.last_client,
         "last_client_ip": last_client_ip,
         "provider_quota": quota,
     }))
@@ -274,17 +275,6 @@ pub async fn handle_proxy(
         .unwrap_or("claude-opus-4-6")
         .to_string();
 
-    // Tracking temps réel
-    {
-        if let Ok(mut g) = state.imp.last_client_format.lock() {
-            *g = client_fmt.to_string();
-        }
-        // last_server_format est toujours "anthropic" (backend fixe)
-        if let Ok(mut g) = state.imp.last_server_format.lock() {
-            *g = "anthropic".to_string();
-        }
-    }
-
     // --- STEP 7: Resolve model (client_model_to_anthropic) ---
     let resolved_model = model_mapping::resolve_model(&original_model, &state.model_config);
     if resolved_model != original_model {
@@ -292,8 +282,25 @@ pub async fn handle_proxy(
             obj.insert("model".to_string(), json!(resolved_model));
         }
     }
-    if let Ok(mut g) = state.imp.last_model.lock() {
-        *g = resolved_model.clone();
+
+    // Tracking temps réel : mise à jour atomique des 4 champs en un seul verrou.
+    // Ordre d'acquisition fixe : meta (ici) → last_client_ip → provider_quota
+    // (dans proxy_status). Aucune inversion possible car chaque site n'acquiert
+    // qu'un sous-ensemble dans le même ordre.
+    // last_client a déjà été mis à jour dans process_request (ci-dessous).
+    // On écrase ici avec le nom du client issu de imp_result après process_request,
+    // mais on anticipe : process_request n'a pas encore été appelé à ce stade,
+    // donc on passe une chaîne vide pour last_client — elle sera mise à jour
+    // dans process_request puis écrasée après l'appel ci-dessous.
+    // Pour éviter une double écriture inutile, on regroupe uniquement
+    // client_format, server_format et model ici, puis process_request
+    // met à jour last_client séparément (verrou court, pas de chevauchement).
+    {
+        let mut g = state.imp.meta.lock();
+        g.last_client_format = client_fmt.to_string();
+        // last_server_format est toujours "anthropic" (backend fixe)
+        g.last_server_format = "anthropic".to_string();
+        g.last_model = resolved_model.clone();
     }
 
     info!(
@@ -1005,8 +1012,9 @@ fn error_response(status: u16, message: &str) -> Response<Body> {
 fn extract_provider_quota(
     headers: &HeaderMap,
     provider: &str,
-    quota_store: &Arc<std::sync::Mutex<std::collections::HashMap<String, Value>>>,
-) {    let mut quota = serde_json::Map::new();
+    quota_store: &Arc<parking_lot::Mutex<std::collections::HashMap<String, Value>>>,
+) {
+    let mut quota = serde_json::Map::new();
 
     // Headers OpenAI-compat (Gemini, OpenAI, xAI, DeepSeek...)
     let rl_headers = [
@@ -1051,9 +1059,8 @@ fn extract_provider_quota(
 
     if !quota.is_empty() {
         quota.insert("_provider".to_string(), json!(provider));
-        if let Ok(mut store) = quota_store.lock() {
-            store.insert(provider.to_string(), Value::Object(quota));
-        }
+        // parking_lot::Mutex ne peut pas être empoisonné → pas de Result à gérer.
+        quota_store.lock().insert(provider.to_string(), Value::Object(quota));
         debug!("quota extracted for provider={provider}");
     }
 }
@@ -1319,7 +1326,7 @@ mod tests {
             imp: Arc::new(crate::impersonation::ImpersonationState::new(false, false)),
             model_config: Arc::new(std::collections::HashMap::new()),
             shutdown_tx,
-            provider_quota: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            provider_quota: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             verbose: Arc::new(AtomicBool::new(false)),
             rate_limiter: Arc::new(crate::rate_limiter::RateLimiter::new()),
             api_usage: Arc::new(crate::api_usage::ApiUsageTracker::new(&tmp_path)),

@@ -313,7 +313,7 @@ pub fn merge_request(
             samples: vec![],
         });
 
-        // FIFO rotation
+        // FIFO rotation — bornée à MAX_SAMPLES (audit-H1: borne vérifiée, pas de croissance non bornée)
         if !dyn_entry.samples.contains(v) {
             dyn_entry.samples.push(v.clone());
             if dyn_entry.samples.len() > MAX_SAMPLES {
@@ -394,6 +394,9 @@ pub fn flush_cache(cache: &ProfileCache) {
 }
 
 /// Flush périodique vers le disque — retourne le nombre de profils effectivement sauvegardés.
+///
+/// SAFETY(audit-H1): Les erreurs I/O sont loguées via `warn!` et n'écrasent PAS le flag
+/// `dirty` — l'entrée sera retentée au prochain cycle de flush. Comportement vérifié.
 pub fn flush_cache_count(cache: &ProfileCache) -> usize {
     let mut guard = cache.write().unwrap();
     let mut flushed = 0usize;
@@ -402,6 +405,8 @@ pub fn flush_cache_count(cache: &ProfileCache) -> usize {
             && entry.last_flush.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS)
         {
             if let Err(e) = save_profile(provider, &entry.data) {
+                // SAFETY(audit-H1): on logue l'erreur mais on NE reset PAS dirty ni
+                // last_flush → retry garanti au prochain cycle de 30s.
                 warn!("flush_cache: cannot save profile for {provider}: {e}");
             } else {
                 debug!("flush_cache: profile {provider} saved");

@@ -32,6 +32,78 @@ pub fn run() {
 
             app.manage(state);
 
+            // Spawn SyncBus si activé
+            if let Some(bus) = app.state::<AppState>().sync_bus.read().clone() {
+                // 1. Démarrer l'écoute TCP entrante
+                let bus_for_start = bus.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = bus_for_start.start().await {
+                        tracing::error!("SyncBus start error: {}", e);
+                    }
+                });
+
+                // 2. Connecter les peers configurés
+                let bus_for_peers = bus.clone();
+                let peers_to_connect: Vec<(String, String, u16)> = {
+                    let app_state_ref = app.state::<AppState>();
+                    let app_state = &*app_state_ref;
+                    let cfg = app_state.config.read();
+                    let v: Vec<(String, String, u16)> = cfg.sync.peers.iter()
+                        .map(|p| (p.id.clone(), p.host.clone(), p.port))
+                        .collect();
+                    v
+                };
+                tauri::async_runtime::spawn(async move {
+                    // Petit délai pour laisser le bus démarrer
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    for (id, host, port) in peers_to_connect {
+                        bus_for_peers.connect_peer(&id, &host, port, ai_sync::compat::PeerProtocol::V3).await;
+                        tracing::info!("P2P: connecting to peer {}@{}:{}", id, host, port);
+                    }
+                });
+
+                // 3. Spawn mDNS discovery
+                let instance_id = bus.instance_id().to_string();
+                let sync_port = {
+                    let app_state_ref = app.state::<AppState>();
+                    let app_state = &*app_state_ref;
+                    let port = app_state.config.read().sync.port;
+                    port
+                };
+                tauri::async_runtime::spawn(async move {
+                    match ai_sync::discovery::PeerDiscovery::new(instance_id, sync_port) {
+                        Ok(discovery) => {
+                            if let Err(e) = discovery.advertise() {
+                                tracing::warn!("mDNS advertise failed: {}", e);
+                            }
+                            let mut rx = discovery.discover();
+                            while let Some(event) = rx.recv().await {
+                                tracing::debug!("mDNS event: {:?}", event);
+                            }
+                            tracing::info!("mDNS discovery channel closed");
+                        }
+                        Err(e) => tracing::warn!("mDNS discovery init failed: {}", e),
+                    }
+                });
+
+                // 4. Spawn SyncCoordinator — traite les messages entrants et reconcilie les credentials
+                let credentials_for_coord = app.state::<AppState>().credentials.clone();
+                let instance_id_coord = bus.instance_id().to_string();
+                let coordinator = std::sync::Arc::new(ai_sync::coordinator::SyncCoordinator::new(
+                    instance_id_coord,
+                    bus.clone(),
+                    credentials_for_coord,
+                ));
+                let (coord_shutdown_tx, coord_shutdown_rx) = tokio::sync::watch::channel(false);
+                *app.state::<AppState>().sync_coordinator_shutdown.lock() = Some(coord_shutdown_tx);
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = coordinator.run(coord_shutdown_rx).await {
+                        tracing::error!("SyncCoordinator error: {}", e);
+                    }
+                });
+                tracing::info!("SyncCoordinator started");
+            }
+
             // Ouvrir les devtools uniquement en mode debug
             #[cfg(debug_assertions)]
             if let Some(window) = app.get_webview_window("main") {
@@ -81,6 +153,8 @@ pub fn run() {
             generate_sync_key,
             set_sync_key,
             test_peer_connection,
+            toggle_sync,
+            set_sync_port,
             // SSH Sync
             get_hostname,
             add_ssh_host,
@@ -197,6 +271,11 @@ async fn quota_refresh_loop(
 
             // Skip API key accounts (no OAuth quota)
             if account.account_type.as_deref() == Some("api") {
+                continue;
+            }
+
+            // Skip non-Anthropic accounts (Google/Gemini don't have Claude quota)
+            if account.effective_provider() != "anthropic" {
                 continue;
             }
 

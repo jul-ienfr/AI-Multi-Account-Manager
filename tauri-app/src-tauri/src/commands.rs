@@ -3,12 +3,15 @@
 //! Toutes les commandes sont async et retournent `Result<T, String>`
 //! pour une gestion d'erreur coherente cote JS.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tracing::{debug, info};
 
 use ai_manager_core::credentials::{AccountData, OAuthData};
 use ai_manager_core::validator;
+use ai_sync::compat::PeerProtocol;
 
 use crate::state::AppState;
 
@@ -24,6 +27,10 @@ pub struct AccountStateDto {
     pub data: AccountDataDto,
     pub quota: Option<QuotaDto>,
     pub is_active: bool,
+    /// true si le compte est en état invalid_grant (token révoqué).
+    pub revoked: bool,
+    /// true si le compte dispose d'au moins un token OAuth ou clé API.
+    pub has_token: bool,
 }
 
 /// Account data DTO (matches AccountData in types.ts).
@@ -94,6 +101,7 @@ impl AccountStateDto {
         data: &AccountData,
         active_key: &Option<String>,
         metrics: Option<&crate::state::QuotaMetricsCache>,
+        invalid_grant: bool,
     ) -> Self {
         // Parse V2 quota JSON field if present
         let (v2_5h_util, v2_7d_util, v2_5h_limit, v2_7d_limit) =
@@ -166,8 +174,14 @@ impl AccountStateDto {
             resets_at_7d: cached_resets_7d,
         });
 
+        let has_token = data.claude_ai_oauth.is_some()
+            || data.setup_token.is_some()
+            || data.api_key.is_some();
+
         Self {
             is_active: active_key.as_deref() == Some(key.as_str()),
+            revoked: invalid_grant,
+            has_token,
             data: AccountDataDto {
                 email: data.email.clone(),
                 name: data.name.clone(),
@@ -263,11 +277,14 @@ pub async fn get_accounts(state: State<'_, AppState>) -> Result<Vec<AccountState
     let data = state.credentials.read();
     let active_key = &data.active_account;
     let metrics = state.quota_metrics.read();
+    let invalid_grant = state.invalid_grant_accounts.read();
     let accounts: Vec<AccountStateDto> = data
         .accounts
         .iter()
         .filter(|(_, a)| !a.deleted)
-        .map(|(k, a)| AccountStateDto::from_entry(k.clone(), a, active_key, metrics.get(k)))
+        .map(|(k, a)| AccountStateDto::from_entry(
+            k.clone(), a, active_key, metrics.get(k), invalid_grant.contains(k)
+        ))
         .collect();
     debug!("get_accounts: {} accounts", accounts.len());
     Ok(accounts)
@@ -278,6 +295,7 @@ pub async fn get_active_account(state: State<'_, AppState>) -> Result<Option<Acc
     let data = state.credentials.read();
     let active_key = &data.active_account;
     let metrics = state.quota_metrics.read();
+    let invalid_grant = state.invalid_grant_accounts.read();
     if let Some(key) = active_key {
         if let Some(account) = data.accounts.get(key) {
             return Ok(Some(AccountStateDto::from_entry(
@@ -285,6 +303,7 @@ pub async fn get_active_account(state: State<'_, AppState>) -> Result<Option<Acc
                 account,
                 active_key,
                 metrics.get(key),
+                invalid_grant.contains(key),
             )));
         }
     }
@@ -803,19 +822,42 @@ pub async fn restart_proxy(kind: Option<String>, state: State<'_, AppState>) -> 
 
 #[tauri::command]
 pub async fn get_sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let peers = state.peers.read();
     let cfg = state.config.read();
+    let bus_opt = state.sync_bus.read().clone();
+    let (peer_count, peers_list) = if let Some(bus) = bus_opt {
+        let raw = bus.list_peers();
+        let count = raw.len();
+        let peers: Vec<_> = raw.into_iter().map(|(id, host, port)| {
+            serde_json::json!({ "id": id, "host": host, "port": port, "connected": true })
+        }).collect();
+        (count, peers)
+    } else {
+        let peers = state.peers.read();
+        let list: Vec<_> = peers.iter().map(|p| serde_json::json!({
+            "id": p.id, "host": p.host, "port": p.port, "connected": p.connected
+        })).collect();
+        let count = list.len();
+        (count, list)
+    };
     Ok(serde_json::json!({
         "enabled": cfg.sync.enabled,
         "port": cfg.sync.port,
-        "peer_count": peers.len(),
-        "peers": peers.clone(),
+        "peer_count": peer_count,
+        "peers": peers_list,
     }))
 }
 
 #[tauri::command]
 pub async fn get_peers(state: State<'_, AppState>) -> Result<Vec<ai_manager_core::types::Peer>, String> {
-    Ok(state.peers.read().clone())
+    let bus_opt = state.sync_bus.read().clone();
+    if let Some(bus) = bus_opt {
+        let peers = bus.list_peers().into_iter().map(|(id, host, port)| {
+            ai_manager_core::types::Peer { id, host, port, connected: true, last_seen: None }
+        }).collect();
+        Ok(peers)
+    } else {
+        Ok(state.peers.read().clone())
+    }
 }
 
 #[tauri::command]
@@ -849,6 +891,25 @@ pub async fn add_peer(
         });
     }
     let _ = state.config.persist();
+    // Connect the peer via the real SyncBus if available
+    let bus_opt = state.sync_bus.read().clone();
+    if let Some(bus) = bus_opt {
+        let peer_id2 = peer_id.clone();
+        // Retrieve host/port from config (host was moved into cfg above)
+        let (h, p) = {
+            let cfg = state.config.read();
+            cfg.sync.peers.iter()
+                .find(|p| p.id == peer_id2)
+                .map(|p| (p.host.clone(), p.port))
+                .unwrap_or_default()
+        };
+        if !h.is_empty() {
+            tauri::async_runtime::spawn(async move {
+                bus.connect_peer(&peer_id2, &h, p, PeerProtocol::V3).await;
+                tracing::info!("P2P: peer {} connected via bus", peer_id2);
+            });
+        }
+    }
     info!("Peer added: {}", peer_id);
     Ok(())
 }
@@ -867,7 +928,120 @@ pub async fn remove_peer(
         cfg.sync.peers.retain(|p| p.id != id);
     }
     let _ = state.config.persist();
+    let bus_opt = state.sync_bus.read().clone();
+    if let Some(bus) = bus_opt {
+        bus.remove_peer(&id);
+    }
     info!("Peer removed: {}", id);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helper: crée, démarre un SyncBus et un SyncCoordinator depuis la config.
+// Stocke le sender shutdown du coordinateur dans state.sync_coordinator_shutdown.
+// ---------------------------------------------------------------------------
+async fn start_sync_bus_from_config(
+    state: &AppState,
+) -> Arc<ai_sync::bus::SyncBus> {
+    let (port, key_bytes, peers_to_connect) = {
+        let cfg = state.config.read();
+        let port = cfg.sync.port;
+        let key_bytes = crate::state::hex_to_bytes(
+            cfg.sync.shared_key_hex.as_deref().unwrap_or(""),
+        )
+        .unwrap_or([0u8; 32]);
+        let peers: Vec<(String, String, u16)> = cfg.sync.peers.iter()
+            .map(|p| (p.id.clone(), p.host.clone(), p.port))
+            .collect();
+        (port, key_bytes, peers)
+    };
+
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    let bus = Arc::new(ai_sync::bus::SyncBus::new(instance_id.clone(), port, key_bytes));
+
+    // 1. Démarrer l'écoute TCP entrante
+    let bus_start = bus.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = bus_start.start().await {
+            tracing::error!("SyncBus start error: {}", e);
+        }
+    });
+
+    // 2. Connecter les pairs configurés (avec délai pour laisser le bind se faire)
+    let bus_peers = bus.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        for (id, host, p) in peers_to_connect {
+            bus_peers.connect_peer(&id, &host, p, PeerProtocol::V3).await;
+        }
+    });
+
+    // 3. Spawn SyncCoordinator — reconcilie les credentials entre instances
+    let coordinator = Arc::new(ai_sync::coordinator::SyncCoordinator::new(
+        instance_id,
+        bus.clone(),
+        state.credentials.clone(),
+    ));
+    let (coord_tx, coord_rx) = tokio::sync::watch::channel(false);
+    // Remplacer l'éventuel coordinateur précédent (signal d'arrêt implicite par drop)
+    *state.sync_coordinator_shutdown.lock() = Some(coord_tx);
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = coordinator.run(coord_rx).await {
+            tracing::error!("SyncCoordinator error: {}", e);
+        }
+    });
+
+    bus
+}
+
+/// Active ou désactive la synchronisation P2P à chaud, sans redémarrer l'app.
+#[tauri::command]
+pub async fn toggle_sync(
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    {
+        let mut cfg = state.config.write();
+        cfg.sync.enabled = enabled;
+    }
+    state.config.persist().map_err(|e| e.to_string())?;
+
+    if !enabled {
+        // Arrêter le coordinateur proprement, puis le bus
+        if let Some(tx) = state.sync_coordinator_shutdown.lock().take() {
+            let _ = tx.send(true);
+        }
+        *state.sync_bus.write() = None;
+        info!("P2P sync disabled");
+        return Ok(());
+    }
+
+    let bus = start_sync_bus_from_config(&state).await;
+    *state.sync_bus.write() = Some(bus);
+    info!("P2P sync enabled");
+    Ok(())
+}
+
+/// Modifie le port TCP de la sync P2P et redémarre le bus si actif.
+#[tauri::command]
+pub async fn set_sync_port(
+    port: u16,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    {
+        let mut cfg = state.config.write();
+        cfg.sync.port = port;
+    }
+    state.config.persist().map_err(|e| e.to_string())?;
+
+    // Si la sync est activée, recréer le bus sur le nouveau port
+    let enabled = state.config.read().sync.enabled;
+    if enabled {
+        *state.sync_bus.write() = None; // arrêter l'ancien bus
+        let bus = start_sync_bus_from_config(&state).await;
+        *state.sync_bus.write() = Some(bus);
+        info!("P2P sync restarted on port {}", port);
+    }
     Ok(())
 }
 

@@ -47,7 +47,7 @@
     </Tooltip>
 
     <Tooltip text="Auto-switch: Changement automatique de compte">
-      <button class="status-item" class:active={autoSwitch} onclick={() => nav("proxy")}>
+      <button class="status-item" class:active={autoSwitch} onclick={() => nav("accounts")}>
         <Shuffle size={12} />
         <span>Switch</span>
         <span class="status-dot" class:on={autoSwitch}></span>
@@ -55,7 +55,7 @@
     </Tooltip>
 
     <Tooltip text="Rotation automatique des comptes">
-      <button class="status-item" class:active={rotation} onclick={() => nav("proxy")}>
+      <button class="status-item" class:active={rotation} onclick={() => nav("accounts")}>
         <RotateCw size={12} />
         <span>Rotation</span>
         <span class="status-dot" class:on={rotation}></span>
@@ -63,7 +63,7 @@
     </Tooltip>
 
     <Tooltip text="Planning horaire d'activite">
-      <button class="status-item" class:active={schedule} onclick={() => nav("settings")}>
+      <button class="status-item" class:active={schedule} onclick={() => nav("settings:schedule")}>
         <Clock size={12} />
         <span>Schedule</span>
         <span class="status-dot" class:on={schedule}></span>
@@ -81,7 +81,7 @@
     </Tooltip>
 
     <Tooltip text="Synchronisation P2P entre instances">
-      <button class="status-item" class:active={syncEnabled} onclick={() => nav("settings")}>
+      <button class="status-item" class:active={syncEnabled} onclick={() => nav("settings:network")}>
         <Wifi size={12} />
         <span>P2P</span>
         <span class="status-dot" class:on={syncEnabled}></span>

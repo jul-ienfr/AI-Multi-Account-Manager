@@ -9,7 +9,7 @@
 //!    c. Réécrire le body via `body_rewriter`
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use tracing::{debug, info, warn};
@@ -22,17 +22,34 @@ use crate::client_signatures;
 // État partagé de l'impersonation
 // ---------------------------------------------------------------------------
 
+/// Métadonnées de la dernière requête, regroupées sous un seul verrou.
+///
+/// Stratégie anti-deadlock (Option B) : les 4 champs `last_*` qui étaient
+/// chacun protégés par un `std::sync::Mutex` indépendant sont maintenant
+/// groupés ici. Un seul `parking_lot::Mutex<ImpersonationMeta>` est acquis
+/// pour lire ou écrire l'ensemble, ce qui :
+/// - supprime tout risque d'inversion d'ordre d'acquisition entre tâches ;
+/// - élimine la possibilité d'empoisonnement (`parking_lot` ne peut pas
+///   empoisonner un mutex) ;
+/// - réduit le nombre d'acquisitions de 4 à 1 dans `proxy_status`.
+#[derive(Debug, Clone, Default)]
+pub struct ImpersonationMeta {
+    pub last_client: String,
+    pub last_client_format: String,
+    pub last_server_format: String,
+    pub last_model: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ImpersonationState {
     pub enabled: bool,
     pub auto_capture: bool,
     /// Cache mémoire des profils par provider
     pub profiles: ProfileCache,
-    /// Dernière requête info (pour status endpoint)
-    pub last_client: Arc<Mutex<String>>,
-    pub last_client_format: Arc<Mutex<String>>,
-    pub last_server_format: Arc<Mutex<String>>,
-    pub last_model: Arc<Mutex<String>>,
+    /// Snapshot de la dernière requête (lecture dans `proxy_status`,
+    /// écriture dans `handle_proxy` et `process_request`).
+    /// Un seul verrou pour les 4 champs — ordre d'acquisition cohérent garanti.
+    pub meta: Arc<parking_lot::Mutex<ImpersonationMeta>>,
 }
 
 impl ImpersonationState {
@@ -82,11 +99,21 @@ impl ImpersonationState {
             enabled,
             auto_capture,
             profiles,
-            last_client: Arc::new(Mutex::new(String::new())),
-            last_client_format: Arc::new(Mutex::new(String::new())),
-            last_server_format: Arc::new(Mutex::new("anthropic".to_string())),
-            last_model: Arc::new(Mutex::new(String::new())),
+            meta: Arc::new(parking_lot::Mutex::new(ImpersonationMeta {
+                last_server_format: "anthropic".to_string(),
+                ..Default::default()
+            })),
         }
+    }
+
+    /// Met à jour les métadonnées de la dernière requête en un seul verrou.
+    /// Appelé depuis `handle_proxy` après résolution du modèle.
+    pub fn update_meta(&self, client: &str, client_format: &str, server_format: &str, model: &str) {
+        let mut g = self.meta.lock();
+        g.last_client = client.to_string();
+        g.last_client_format = client_format.to_string();
+        g.last_server_format = server_format.to_string();
+        g.last_model = model.to_string();
     }
 }
 
@@ -130,9 +157,12 @@ pub async fn process_request(
         .map(|m| m.client_name.clone())
         .unwrap_or_default();
 
-    // Tracking temps réel
-    if let Ok(mut g) = state.last_client.lock() {
-        *g = client_name.clone();
+    // Tracking temps réel : mise à jour partielle de last_client uniquement.
+    // Les autres champs (client_format, server_format, model) sont mis à jour
+    // atomiquement par handle_proxy via update_meta() après résolution du modèle.
+    {
+        let mut g = state.meta.lock();
+        g.last_client = client_name.clone();
     }
 
     // Auto-capture si client natif connu

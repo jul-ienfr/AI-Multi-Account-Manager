@@ -221,7 +221,6 @@ impl RefreshLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use ai_core::credentials::{AccountData, CredentialsCache, OAuthData};
     use chrono::Utc;
 

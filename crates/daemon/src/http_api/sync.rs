@@ -22,12 +22,26 @@ use super::{DaemonState, error_json, ok_json};
 /// `GET /sync/status` — état général de la synchronisation P2P.
 pub async fn sync_status(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
     let sync = state.config.read().sync.clone();
-    let peers = state.peers.read().clone();
+    let (peer_count, peers_list) = if let Some(bus) = &state.sync_bus {
+        let raw = bus.list_peers();
+        let count = raw.len();
+        let list: Vec<_> = raw.into_iter().map(|(id, host, port)| {
+            json!({ "id": id, "host": host, "port": port, "connected": true })
+        }).collect();
+        (count, list)
+    } else {
+        let peers = state.peers.read().clone();
+        let list: Vec<_> = peers.iter().map(|p| json!({
+            "id": p.id, "host": p.host, "port": p.port, "connected": p.connected
+        })).collect();
+        let count = list.len();
+        (count, list)
+    };
     ok_json(json!({
         "enabled": sync.enabled,
         "port": sync.port,
-        "peer_count": peers.len(),
-        "peers": peers,
+        "peer_count": peer_count,
+        "peers": peers_list,
         "key_configured": sync.shared_key_hex.is_some(),
     }))
 }
@@ -36,10 +50,17 @@ pub async fn sync_status(State(state): State<Arc<DaemonState>>) -> impl IntoResp
 // list_peers
 // ---------------------------------------------------------------------------
 
-/// `GET /peers` — liste des pairs configurés.
+/// `GET /peers` — liste des pairs (live depuis le bus si actif, sinon config statique).
 pub async fn list_peers(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
-    let peers = state.peers.read().clone();
-    ok_json(peers)
+    if let Some(bus) = &state.sync_bus {
+        let peers: Vec<Peer> = bus.list_peers().into_iter().map(|(id, host, port)| {
+            Peer { id, host, port, connected: true, last_seen: None }
+        }).collect();
+        ok_json(peers)
+    } else {
+        let peers = state.peers.read().clone();
+        ok_json(peers)
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -15,8 +15,13 @@
     Settings, Bell, Wifi, Server, Palette, Database, Keyboard, Calendar,
   } from "lucide-svelte";
 
+  interface Props {
+    initialSection?: string;
+  }
+  let { initialSection = "general" }: Props = $props();
+
   type Section = "general" | "alerts" | "schedule" | "network" | "providers" | "theme" | "data" | "hotkeys";
-  let activeSection: Section = $state("general");
+  let activeSection: Section = $state(initialSection as Section);
 
   const sections: Array<{ id: Section; label: string; icon: any }> = [
     { id: "general", label: "Général", icon: Settings },

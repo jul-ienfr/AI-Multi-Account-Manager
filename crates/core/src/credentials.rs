@@ -70,6 +70,7 @@ mod flexible_datetime {
 // ---------------------------------------------------------------------------
 
 /// Donnees OAuth d'un compte (V2 + V3 compatible).
+/// Accepte camelCase (V3) et snake_case (V2 Python) via aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthData {
@@ -119,6 +120,7 @@ impl OAuthData {
 // ---------------------------------------------------------------------------
 
 /// Donnees d'un compte (V2 + V3 compatible).
+/// Accepte camelCase (V3) et snake_case (V2 Python) via aliases.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountData {
@@ -127,17 +129,17 @@ pub struct AccountData {
     pub name: Option<String>,
     #[serde(default)]
     pub email: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "display_name")]
     pub display_name: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "account_type")]
     pub account_type: Option<String>,
     #[serde(default)]
     pub priority: Option<u32>,
-    #[serde(default)]
+    #[serde(default, alias = "plan_type")]
     pub plan_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "auto_switch_disabled")]
     pub auto_switch_disabled: Option<bool>,
 
     // --- V2 OAuth slots ---
@@ -159,34 +161,35 @@ pub struct AccountData {
     pub oauth: Option<OAuthData>,
 
     // --- API key accounts (V2) ---
-    #[serde(default)]
+    #[serde(default, alias = "api_key")]
     pub api_key: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, alias = "api_url")]
     pub api_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "auth_type")]
     pub auth_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "auth_header")]
     pub auth_header: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "api_format")]
     pub api_format: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "model_override")]
     pub model_override: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "model_mappings")]
     pub model_mappings: Option<HashMap<String, String>>,
 
     // --- Google ---
-    #[serde(default)]
+    #[serde(default, alias = "gemini_project")]
     pub gemini_project: Option<String>,
 
     // --- Quota tracking (V3) ---
-    #[serde(default)]
+    #[serde(default, alias = "tokens_5h")]
     pub tokens_5h: u64,
-    #[serde(default)]
+    #[serde(default, alias = "tokens_7d")]
     pub tokens_7d: u64,
-    #[serde(default)]
+    #[serde(default, alias = "quota_5h")]
     pub quota_5h: Option<u64>,
     #[serde(
         default,
+        alias = "last_refresh",
         deserialize_with = "flexible_datetime::deserialize",
         serialize_with = "flexible_datetime::serialize"
     )]
@@ -195,13 +198,13 @@ pub struct AccountData {
     // --- Metadata ---
     #[serde(default)]
     pub deleted: bool,
-    #[serde(default)]
+    #[serde(default, alias = "organization_uuid")]
     pub organization_uuid: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "added_at")]
     pub added_at: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "last_used")]
     pub last_used: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "source_locations")]
     pub source_locations: Option<Vec<String>>,
     #[serde(default)]
     pub quota: Option<serde_json::Value>,
@@ -264,6 +267,7 @@ impl AccountData {
 }
 
 /// Structure racine du fichier `credentials-multi.json`.
+/// Accepte camelCase (V3) et snake_case (V2 Python) via aliases.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialsFile {

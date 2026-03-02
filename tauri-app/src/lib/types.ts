@@ -40,6 +40,10 @@ export interface AccountState {
   data: AccountData;
   quota?: QuotaInfo;
   isActive: boolean;
+  /** true si token révoqué (invalid_grant) — exclu de la rotation */
+  revoked?: boolean;
+  /** true si au moins un token OAuth ou clé API est présent */
+  hasToken?: boolean;
 }
 
 export interface ProxyStatus {

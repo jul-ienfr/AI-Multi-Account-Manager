@@ -22,7 +22,7 @@ export default defineConfig({
     target: "esnext",
     minify: "esbuild",
     sourcemap: false,
-    outDir: "/home/jul/code/openclaw-studio/public/ai-manager/admin",
+    outDir: "dist",
     emptyOutDir: true,
   },
   test: {

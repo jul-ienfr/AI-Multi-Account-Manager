@@ -7,8 +7,9 @@
   import {
     RefreshCw, MoreVertical, Trash2, ArrowRightLeft,
     ShieldOff, Shield, SlidersHorizontal, Key, KeyRound,
-    Ban, RotateCw
+    Ban, RotateCw, AlertTriangle, WifiOff
   } from "lucide-svelte";
+  import { toast } from "../../lib/stores/toast";
 
   interface Props {
     account: AccountState;
@@ -74,6 +75,25 @@
     account.data.accountType === "api"
   );
 
+  // ---- Statut opérationnel du compte ----
+  type AccountStatus = "active" | "available" | "excluded" | "revoked" | "no_token";
+  let accountStatus: AccountStatus = $derived(
+    account.revoked ? "revoked"
+    : !(account.hasToken ?? true) ? "no_token"
+    : account.isActive ? "active"
+    : (account.data.autoSwitchDisabled ?? false) ? "excluded"
+    : "available"
+  );
+  const statusConfig: Record<AccountStatus, { label: string; color: string }> = {
+    active:   { label: "Actif",      color: "var(--status-running)" },
+    available:{ label: "Disponible", color: "var(--accent)" },
+    excluded: { label: "Exclu",      color: "var(--status-warning)" },
+    revoked:  { label: "Révoqué",    color: "var(--status-stopped)" },
+    no_token: { label: "Sans token", color: "var(--fg-dim)" },
+  };
+  let statusLabel = $derived(statusConfig[accountStatus].label);
+  let statusColor = $derived(statusConfig[accountStatus].color);
+
   function formatTokens(n: number): string {
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
     if (n >= 1_000) return (n / 1_000).toFixed(0) + "k";
@@ -128,24 +148,40 @@
 
   async function handleSwitch() {
     closeContextMenu();
-    await accounts.switch(account.key);
+    try {
+      await accounts.switch(account.key);
+    } catch (e) {
+      toast.error("Erreur", String(e));
+    }
   }
 
   async function handleRefresh() {
     closeContextMenu();
-    await accounts.refresh(account.key);
+    try {
+      await accounts.refresh(account.key);
+    } catch (e) {
+      toast.error("Refresh echoue", String(e));
+    }
   }
 
   async function handleDelete() {
     closeContextMenu();
-    await accounts.delete(account.key);
+    try {
+      await accounts.delete(account.key);
+    } catch (e) {
+      toast.error("Erreur", String(e));
+    }
   }
 
   async function handleToggleAutoSwitch() {
     closeContextMenu();
-    await accounts.updateAccount(account.key, {
-      autoSwitchDisabled: !isAutoSwitchDisabled,
-    });
+    try {
+      await accounts.updateAccount(account.key, {
+        autoSwitchDisabled: !isAutoSwitchDisabled,
+      });
+    } catch (e) {
+      toast.error("Erreur", String(e));
+    }
   }
 
   function handlePriority() {
@@ -154,13 +190,21 @@
   }
 
   async function savePriority() {
-    await accounts.updateAccount(account.key, { priority: priorityValue });
+    try {
+      await accounts.updateAccount(account.key, { priority: priorityValue });
+    } catch (e) {
+      toast.error("Erreur", String(e));
+    }
     closeContextMenu();
   }
 
   async function handleRefreshToken() {
     closeContextMenu();
-    await accounts.refresh(account.key);
+    try {
+      await accounts.refresh(account.key);
+    } catch (e) {
+      toast.error("Refresh token echoue", String(e));
+    }
   }
 </script>
 
@@ -168,7 +212,9 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="account-card-wrapper" oncontextmenu={handleContextMenu} ondblclick={handleSwitch}>
-  <Card active={account.isActive}>
+  <!-- Barre de statut gauche colorée (positionnée sur le bord de la carte) -->
+  <div class="status-strip" style="background: {statusColor}"></div>
+  <Card active={account.isActive} padding="16px 16px 16px 20px">
     <div class="card-layout">
       <div class="card-left">
         <QuotaRing
@@ -186,6 +232,15 @@
               <span class="active-dot" class:pulse={isPulse}></span>
             {/if}
             <span class="card-name">{displayName}</span>
+            <!-- Indicateur d'état opérationnel -->
+            <span class="status-badge" style="color: {statusColor}; border-color: {statusColor}">
+              {#if accountStatus === "revoked"}
+                <AlertTriangle size={10} />
+              {:else if accountStatus === "no_token"}
+                <WifiOff size={10} />
+              {/if}
+              {statusLabel}
+            </span>
           </div>
           {#if account.data.email}
             <span class="card-email">{account.data.email}</span>
@@ -363,6 +418,34 @@
     position: relative;
   }
 
+  /* Barre verticale colorée sur le bord gauche de la carte */
+  .status-strip {
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 3px;
+    border-radius: 0 2px 2px 0;
+    opacity: 0.85;
+    pointer-events: none;
+  }
+
+  /* Badge état opérationnel (Actif / Disponible / Exclu / Révoqué / Sans token) */
+  .status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: auto;
+    padding: 1px 7px;
+    border-radius: 10px;
+    border: 1px solid currentColor;
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+    opacity: 0.9;
+    flex-shrink: 0;
+  }
+
   .card-layout {
     display: flex;
     align-items: flex-start;
@@ -397,7 +480,7 @@
   }
 
   .card-name {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
     color: var(--fg-primary);
     overflow: hidden;
@@ -406,7 +489,7 @@
   }
 
   .card-email {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--fg-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -447,15 +530,15 @@
   }
 
   .quota-bar-label {
-    font-size: 10px;
+    font-size: 12px;
     color: var(--fg-dim);
-    width: 14px;
+    width: 16px;
     flex-shrink: 0;
   }
 
   .quota-bar-track {
     flex: 1;
-    height: 3px;
+    height: 4px;
     background: var(--border);
     border-radius: 2px;
     overflow: hidden;
@@ -468,15 +551,15 @@
   }
 
   .quota-bar-value {
-    font-size: 10px;
+    font-size: 12px;
     color: var(--fg-secondary);
-    width: 26px;
+    width: 30px;
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
 
   .quota-bar-extra {
-    font-size: 9px;
+    font-size: 11px;
     color: var(--fg-dim);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
@@ -485,7 +568,7 @@
   }
 
   .last-updated {
-    font-size: 9px;
+    font-size: 11px;
     color: var(--fg-dim);
   }
 

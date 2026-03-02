@@ -163,6 +163,16 @@ export const generateSyncKey = () =>
   post<{ key: string }>("sync/key/generate").then((r) => r.key);
 export const setSyncKey = (key: string) => post<void>("sync/key/set", { key });
 
+// Helpers config-based (enable/disable sync, change port via PUT /config)
+export const toggleSync = async (enabled: boolean) => {
+  const cfg = await getConfig();
+  await setConfig({ ...cfg, sync: { ...cfg.sync, enabled } });
+};
+export const setSyncPort = async (port: number) => {
+  const cfg = await getConfig();
+  await setConfig({ ...cfg, sync: { ...cfg.sync, port } });
+};
+
 // --- Peers ---
 export const getPeers = () => get<Peer[]>("peers");
 export const addPeer = (host: string, port: number, id?: string) => post<void>("peers", { host, port, id });

@@ -209,7 +209,6 @@ fn validate_account_data(data: &AccountData) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use chrono::Utc;
     use crate::credentials::{AccountData, CredentialsCache, OAuthData};
 

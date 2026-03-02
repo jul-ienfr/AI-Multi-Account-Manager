@@ -49,7 +49,7 @@ pub async fn start(addr: SocketAddr) -> anyhow::Result<()> {
         imp: imp.clone(),
         model_config,
         shutdown_tx,
-        provider_quota: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        provider_quota: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         verbose: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         rate_limiter: Arc::new(crate::rate_limiter::RateLimiter::new()),
         api_usage: Arc::new(crate::api_usage::ApiUsageTracker::new(&multi_account_dir)),

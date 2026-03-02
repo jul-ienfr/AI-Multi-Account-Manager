@@ -16,6 +16,13 @@
 
   type Screen = "accounts" | "proxy" | "monitoring" | "settings";
   let currentScreen: Screen = $state("accounts");
+  let settingsSection: string = $state("general");
+
+  function handleNav(raw: string) {
+    const [screen, section] = raw.split(":");
+    currentScreen = screen as Screen;
+    if (section) settingsSection = section;
+  }
 
   onMount(async () => {
     try {
@@ -25,7 +32,7 @@
     }
     onQuotaUpdate(({ key, quota }) => accounts.updateQuota(key, quota));
     onToast((t: any) => (toast as any)[t.type]?.(t.title, t.message));
-    onAccountSwitch((key) => accounts.switch(key));
+    onAccountSwitch((key) => accounts.switch(key).catch(e => console.error("Account switch failed:", e)));
   });
 
   // Keyboard navigation (Phase 7.7)
@@ -40,7 +47,7 @@
         currentScreen = screens[(idx - 1 + screens.length) % screens.length];
         e.preventDefault();
       } else if (e.key === "r" || e.key === "R") {
-        accounts.load();
+        accounts.load().catch(e => console.error("Reload accounts failed:", e));
         e.preventDefault();
       }
     }
@@ -61,12 +68,12 @@
         {:else if currentScreen === "monitoring"}
           <Monitoring />
         {:else}
-          <Settings />
+          <Settings initialSection={settingsSection} />
         {/if}
       </div>
     {/key}
   </main>
-  <StatusBar onnavigate={(s) => { currentScreen = s as Screen; }} />
+  <StatusBar onnavigate={handleNav} />
   <Toast />
 </div>
 

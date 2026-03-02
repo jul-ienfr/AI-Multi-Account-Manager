@@ -44,6 +44,9 @@ pub struct AppState {
     pub proxy_instances: Arc<RwLock<HashMap<String, Arc<ProxyInstanceRuntime>>>>,
     /// Pairs P2P connectés.
     pub peers: Arc<RwLock<Vec<Peer>>>,
+    /// Bus de synchronisation P2P (None si sync désactivée).
+    /// Wrappé dans RwLock pour permettre le démarrage/arrêt dynamique via le toggle.
+    pub sync_bus: Arc<RwLock<Option<Arc<ai_sync::bus::SyncBus>>>>,
     /// Chemin vers credentials-multi.json.
     pub credentials_path: PathBuf,
     /// Chemin vers settings.json.
@@ -61,6 +64,20 @@ pub struct AppState {
     pub invalid_grant_accounts: Arc<RwLock<HashSet<String>>>,
     /// Journal d'événements applicatifs (Phase 6.5).
     pub event_log: Arc<EventLog>,
+    /// Sender shutdown du SyncCoordinator actif.
+    /// Envoyer `true` arrête le coordinateur proprement.
+    pub sync_coordinator_shutdown: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
+}
+
+/// Convertit une chaîne hexadécimale de 64 caractères en tableau de 32 bytes.
+pub(crate) fn hex_to_bytes(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 { return None; }
+    let mut out = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let s = std::str::from_utf8(chunk).ok()?;
+        out[i] = u8::from_str_radix(s, 16).ok()?;
+    }
+    Some(out)
 }
 
 impl AppState {
@@ -116,6 +133,19 @@ impl AppState {
             instances_map.insert(inst_cfg.id.clone(), runtime);
         }
 
+        // Initialise le SyncBus si P2P est activé
+        let sync_bus = if config.read().sync.enabled {
+            let cfg = config.read();
+            let port = cfg.sync.port;
+            let key_bytes = cfg.sync.shared_key_hex.as_deref()
+                .and_then(|h| hex_to_bytes(h))
+                .unwrap_or([0u8; 32]);
+            let instance_id = uuid::Uuid::new_v4().to_string();
+            Some(Arc::new(ai_sync::bus::SyncBus::new(instance_id, port, key_bytes)))
+        } else {
+            None
+        };
+
         info!(
             "AppState initialized: {} accounts, {} proxy instances, credentials={:?}",
             credentials.account_count(),
@@ -132,12 +162,14 @@ impl AppState {
             proxy_impersonator_task: Arc::new(Mutex::new(None)),
             proxy_instances: Arc::new(RwLock::new(instances_map)),
             peers: Arc::new(RwLock::new(Vec::new())),
+            sync_bus: Arc::new(RwLock::new(sync_bus)),
             credentials_path,
             settings_path,
             velocity_calculators: Arc::new(RwLock::new(HashMap::new())),
             quota_metrics: Arc::new(RwLock::new(HashMap::new())),
             invalid_grant_accounts: Arc::new(RwLock::new(HashSet::new())),
             event_log,
+            sync_coordinator_shutdown: Arc::new(Mutex::new(None)),
         })
     }
 }

@@ -34,6 +34,8 @@
     getSystemdStatus,
     installSystemdService,
     uninstallSystemdService,
+    toggleSync,
+    setSyncPort,
   } from "../../lib/tauri";
 
   let cfg: AppConfig | null = $state(null);
@@ -95,8 +97,16 @@
 
   async function updateP2PEnabled(checked: boolean) {
     if (!cfg?.sync) return;
-    await config.save({ sync: { ...cfg.sync, enabled: checked } } as Partial<AppConfig>);
+    // toggle_sync sauvegarde la config ET démarre/arrête le bus à chaud
+    await toggleSync(checked);
+    await config.load();
     await syncStore.load();
+  }
+
+  async function handlePortChange(newPort: number) {
+    if (!cfg?.sync || newPort < 1024 || newPort > 65535) return;
+    await setSyncPort(newPort);
+    await config.load();
   }
 
   async function updateSyncOption(field: string, value: boolean) {
@@ -257,14 +267,22 @@
       </Card>
 
       {#if cfg?.sync?.enabled}
-        <!-- Port + Instance ID -->
+        <!-- Port TCP (éditable) -->
         <Card hoverable={false}>
           <div class="setting-row">
             <div class="setting-info">
               <span class="setting-label">Port TCP</span>
-              <span class="setting-desc">Port de la synchronisation P2P</span>
+              <span class="setting-desc">Port de la synchronisation P2P (1024–65535)</span>
             </div>
-            <code class="mono-value">{cfg?.sync?.port ?? 9090}</code>
+            <input
+              type="number"
+              class="port-edit-input"
+              min="1024"
+              max="65535"
+              value={cfg?.sync?.port ?? 9090}
+              onblur={(e) => handlePortChange(Number((e.currentTarget as HTMLInputElement).value))}
+              onkeydown={(e) => { if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur(); }}
+            />
           </div>
         </Card>
 
@@ -755,6 +773,23 @@
     background: var(--bg-app);
     padding: 2px 8px;
     border-radius: var(--radius-sm);
+  }
+
+  .port-edit-input {
+    width: 76px;
+    padding: 5px 8px;
+    background: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--fg-primary);
+    font-size: 13px;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    text-align: right;
+  }
+
+  .port-edit-input:focus {
+    outline: none;
+    border-color: var(--accent);
   }
 
   /* Key section */

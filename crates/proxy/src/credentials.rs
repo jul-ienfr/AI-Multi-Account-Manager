@@ -131,9 +131,22 @@ impl CredentialsCache {
     }
 
     /// Recharge le fichier depuis le disque.
+    /// Si le parsing échoue (fichier corrompu / en cours d'écriture), le cache
+    /// existant est conservé et un avertissement est émis — Fix H3.
     pub fn reload(&self) {
-        if let Some(data) = Self::read_file(&self.path) {
-            *self.data.write().unwrap() = data;
+        match Self::read_file(&self.path) {
+            Some(new_data) => {
+                let n = new_data.accounts.len();
+                *self.data.write().unwrap() = new_data;
+                tracing::debug!("Credentials reloaded: {} account(s)", n);
+            }
+            None => {
+                tracing::warn!(
+                    "Credentials reload failed (parse error or missing file): \
+                     keeping existing cache"
+                );
+                // Ne pas écraser le cache existant.
+            }
         }
     }
 
@@ -163,18 +176,50 @@ impl CredentialsCache {
     }
 
     /// Retourne les infos du compte actif, prêtes pour le proxy.
+    ///
+    /// Toute la lecture (clé active + lookup dans accounts) est effectuée sous
+    /// le MÊME read-guard afin d'éviter la race condition TOCTOU — Fix H2.
+    ///
+    /// Si le compte actif est absent de la map (supprimé lors d'un reload), un
+    /// fallback retourne le premier compte valide (non supprimé, avec OAuth).
     pub fn get_active(&self) -> Option<ActiveAccount> {
+        // Une seule acquisition du verrou pour toute la fonction.
         let guard = self.data.read().unwrap();
 
-        // Trouver le compte actif
-        let (key, account) = if let Some(ref active_key) = guard.active_account {
-            guard
-                .accounts
-                .get(active_key)
-                .map(|a| (active_key.clone(), a))
-        } else {
-            None
-        }?;
+        // Chercher le compte désigné par active_account, tout sous le même guard.
+        let (key, account) = guard
+            .active_account
+            .as_ref()
+            .and_then(|active_key| {
+                guard
+                    .accounts
+                    .get(active_key)
+                    .map(|a| (active_key.clone(), a))
+            })
+            // Fallback H2 : si le compte actif a disparu, prendre le premier
+            // compte valide (avec un token OAuth ou une clé API exploitable).
+            .or_else(|| {
+                guard.accounts.iter().find_map(|(k, a)| {
+                    let has_oauth = a.claude_ai_oauth.as_ref()
+                        .and_then(|s| s.access_token.as_deref())
+                        .map(|t| !t.is_empty())
+                        .unwrap_or(false)
+                        || a.setup_token.as_ref()
+                            .and_then(|s| s.access_token.as_deref())
+                            .map(|t| !t.is_empty())
+                            .unwrap_or(false)
+                        || a.gemini_cli_oauth.as_ref()
+                            .and_then(|s| s.access_token.as_deref())
+                            .map(|t| !t.is_empty())
+                            .unwrap_or(false)
+                        || extract_api_key(a).is_some();
+                    if has_oauth {
+                        Some((k.clone(), a))
+                    } else {
+                        None
+                    }
+                })
+            })?;
 
         let email = account.email.clone().unwrap_or(key);
         let provider = account.provider.clone().unwrap_or_else(|| "anthropic".to_string());

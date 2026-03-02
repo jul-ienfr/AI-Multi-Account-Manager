@@ -93,7 +93,7 @@ body,
   background: var(--bg-app);
   color: var(--fg-primary);
   font-family: "Inter", "Geist Sans", system-ui, -apple-system, sans-serif;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
