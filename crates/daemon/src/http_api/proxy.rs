@@ -623,30 +623,35 @@ pub async fn list_binaries() -> impl IntoResponse {
         }
     }
 
-    let candidates = [
-        (
-            "router-rust",
-            "anthrouter",
-            "anthrouter/anthrouter.exe",
-            18080u16,
-        ),
-        (
-            "impersonator-rust",
-            "claude-impersonator",
-            "claude-impersonator.exe",
-            18081,
-        ),
-        (
-            "translator-rust",
-            "claude-translator",
-            "claude-translator.exe",
-            18082,
-        ),
-    ];
-
     let mut binaries: Vec<DetectedBinary> = Vec::new();
 
-    for (id, name, rel_path, port) in &candidates {
+    // anthrouter: check multiple build output paths
+    let anthrouter_paths = [
+        "anthrouter/target/x86_64-pc-windows-gnu/release/anthrouter.exe",
+        "anthrouter/target/release/anthrouter.exe",
+        "anthrouter/target/release/anthrouter",
+        "anthrouter/anthrouter.exe",
+        "anthrouter/anthrouter",
+    ];
+    for rel in &anthrouter_paths {
+        let p = root.join(rel);
+        if p.exists() {
+            binaries.push(DetectedBinary {
+                id: "router-rust".to_string(),
+                name: "anthrouter".to_string(),
+                path: p.to_string_lossy().to_string(),
+                default_port: 18080,
+            });
+            break;
+        }
+    }
+
+    // Other legacy binaries (standalone executables)
+    let legacy_candidates = [
+        ("impersonator-rust", "claude-impersonator", "claude-impersonator.exe", 18081u16),
+        ("translator-rust", "claude-translator", "claude-translator.exe", 18082),
+    ];
+    for (id, name, rel_path, port) in &legacy_candidates {
         let full_path = root.join(rel_path);
         if full_path.exists() {
             binaries.push(DetectedBinary {
@@ -657,7 +662,6 @@ pub async fn list_binaries() -> impl IntoResponse {
             });
             continue;
         }
-        // Essai sans .exe (Linux)
         let linux_path = root.join(rel_path.trim_end_matches(".exe"));
         if linux_path.exists() {
             binaries.push(DetectedBinary {
